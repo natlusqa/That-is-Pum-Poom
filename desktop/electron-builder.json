@@ -1,0 +1,30 @@
+{
+  "appId": "ai.korgan.desktop",
+  "productName": "KORGAN AI Desktop",
+  "directories": {
+    "output": "release",
+    "buildResources": "assets"
+  },
+  "files": [
+    "main.js",
+    "preload.js",
+    "dist/**/*",
+    "assets/**/*"
+  ],
+  "extraResources": [],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      }
+    ],
+    "icon": "assets/icon.ico"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "installerIcon": "assets/icon.ico",
+    "uninstallerIcon": "assets/icon.ico"
+  }
+}

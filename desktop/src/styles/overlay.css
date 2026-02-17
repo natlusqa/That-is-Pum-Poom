@@ -1,0 +1,254 @@
+/* KORGAN AI - JARVIS-style blue energy edge glow */
+
+.korgan-overlay {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Edge glow bars - energy running along screen edges */
+.glow-edge {
+  position: absolute;
+  background: transparent;
+}
+
+.glow-top {
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--glow-width, 4px);
+  box-shadow: 
+    0 0 20px color-mix(in srgb, var(--glow-color) 60%, transparent),
+    0 0 40px color-mix(in srgb, var(--glow-color) 40%, transparent),
+    0 0 60px color-mix(in srgb, var(--glow-color) 25%, transparent),
+    inset 0 0 20px color-mix(in srgb, var(--glow-color) 30%, transparent);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 20%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.9) * 100%), transparent) 50%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 80%,
+    transparent 100%
+  );
+  opacity: var(--glow-opacity, 0.9);
+}
+
+.glow-bottom {
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--glow-width, 4px);
+  box-shadow: 
+    0 0 20px color-mix(in srgb, var(--glow-color) 60%, transparent),
+    0 0 40px color-mix(in srgb, var(--glow-color) 40%, transparent),
+    0 0 60px color-mix(in srgb, var(--glow-color) 25%, transparent),
+    inset 0 0 20px color-mix(in srgb, var(--glow-color) 30%, transparent);
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 20%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.9) * 100%), transparent) 50%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 80%,
+    transparent 100%
+  );
+  opacity: var(--glow-opacity, 0.9);
+}
+
+.glow-left {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: var(--glow-width, 4px);
+  box-shadow: 
+    0 0 20px color-mix(in srgb, var(--glow-color) 60%, transparent),
+    0 0 40px color-mix(in srgb, var(--glow-color) 40%, transparent),
+    0 0 60px color-mix(in srgb, var(--glow-color) 25%, transparent),
+    inset 0 0 20px color-mix(in srgb, var(--glow-color) 30%, transparent);
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 20%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.9) * 100%), transparent) 50%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 80%,
+    transparent 100%
+  );
+  opacity: var(--glow-opacity, 0.9);
+}
+
+.glow-right {
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: var(--glow-width, 4px);
+  box-shadow: 
+    0 0 20px color-mix(in srgb, var(--glow-color) 60%, transparent),
+    0 0 40px color-mix(in srgb, var(--glow-color) 40%, transparent),
+    0 0 60px color-mix(in srgb, var(--glow-color) 25%, transparent),
+    inset 0 0 20px color-mix(in srgb, var(--glow-color) 30%, transparent);
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 20%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.9) * 100%), transparent) 50%,
+    color-mix(in srgb, var(--glow-color) calc(var(--glow-opacity, 0.8) * 100%), transparent) 80%,
+    transparent 100%
+  );
+  opacity: var(--glow-opacity, 0.9);
+}
+
+/* Corner accents - energy nodes */
+.glow-corner {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--glow-color);
+  opacity: var(--glow-opacity, 0.8);
+}
+
+.glow-corner-tl {
+  top: 8px;
+  left: 8px;
+  border-right: none;
+  border-bottom: none;
+  box-shadow: -2px -2px 12px color-mix(in srgb, var(--glow-color) 50%, transparent);
+}
+
+.glow-corner-tr {
+  top: 8px;
+  right: 8px;
+  border-left: none;
+  border-bottom: none;
+  box-shadow: 2px -2px 12px color-mix(in srgb, var(--glow-color) 50%, transparent);
+}
+
+.glow-corner-br {
+  bottom: 8px;
+  right: 8px;
+  border-left: none;
+  border-top: none;
+  box-shadow: 2px 2px 12px color-mix(in srgb, var(--glow-color) 50%, transparent);
+}
+
+.glow-corner-bl {
+  bottom: 8px;
+  left: 8px;
+  border-right: none;
+  border-top: none;
+  box-shadow: -2px 2px 12px color-mix(in srgb, var(--glow-color) 50%, transparent);
+}
+
+/* ANIMATIONS */
+
+/* Pulse - listening state */
+.korgan-overlay[data-animation='pulse'] .glow-edge,
+.korgan-overlay[data-animation='pulse'] .glow-corner {
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% {
+    opacity: calc(var(--glow-opacity, 0.9) * 0.6);
+    filter: brightness(0.9);
+  }
+  50% {
+    opacity: var(--glow-opacity, 0.9);
+    filter: brightness(1.2);
+  }
+}
+
+/* Particles - thinking state (traveling energy) */
+.korgan-overlay[data-animation='particles'] .glow-top {
+  animation: particle-flow-h 3s linear infinite;
+}
+
+.korgan-overlay[data-animation='particles'] .glow-bottom {
+  animation: particle-flow-h 3s linear infinite reverse;
+}
+
+.korgan-overlay[data-animation='particles'] .glow-left {
+  animation: particle-flow-v 2.5s linear infinite;
+}
+
+.korgan-overlay[data-animation='particles'] .glow-right {
+  animation: particle-flow-v 2.5s linear infinite reverse;
+}
+
+@keyframes particle-flow-h {
+  0% { filter: hue-rotate(0deg) brightness(1); }
+  25% { filter: hue-rotate(5deg) brightness(1.3); }
+  50% { filter: hue-rotate(0deg) brightness(1); }
+  75% { filter: hue-rotate(-5deg) brightness(1.2); }
+  100% { filter: hue-rotate(0deg) brightness(1); }
+}
+
+@keyframes particle-flow-v {
+  0% { filter: hue-rotate(0deg) brightness(1); }
+  33% { filter: hue-rotate(8deg) brightness(1.25); }
+  66% { filter: hue-rotate(-8deg) brightness(1.15); }
+  100% { filter: hue-rotate(0deg) brightness(1); }
+}
+
+/* Wave - speaking state */
+.korgan-overlay[data-animation='wave'] .glow-edge {
+  animation: glow-wave 1.5s ease-in-out infinite;
+}
+
+@keyframes glow-wave {
+  0%, 100% {
+    opacity: calc(var(--glow-opacity, 0.9) * 0.7);
+  }
+  25% {
+    opacity: var(--glow-opacity, 0.9);
+  }
+  50% {
+    opacity: calc(var(--glow-opacity, 0.9) * 0.85);
+  }
+  75% {
+    opacity: var(--glow-opacity, 0.9);
+  }
+}
+
+/* Flash - crisis state */
+.korgan-overlay[data-animation='flash'] .glow-edge,
+.korgan-overlay[data-animation='flash'] .glow-corner {
+  animation: glow-flash 0.5s ease-in-out infinite;
+}
+
+@keyframes glow-flash {
+  0%, 100% {
+    opacity: var(--glow-opacity, 1);
+    filter: brightness(1.5);
+  }
+  50% {
+    opacity: calc(var(--glow-opacity, 1) * 0.5);
+    filter: brightness(0.8);
+  }
+}
+
+/* Fallback for browsers without color-mix */
+@supports not (color: color-mix(in srgb, red, blue)) {
+  .glow-top,
+  .glow-bottom {
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      var(--glow-color) 20%,
+      var(--glow-color) 80%,
+      transparent 100%
+    );
+  }
+
+  .glow-left,
+  .glow-right {
+    background: linear-gradient(
+      180deg,
+      transparent 0%,
+      var(--glow-color) 20%,
+      var(--glow-color) 80%,
+      transparent 100%
+    );
+  }
+}

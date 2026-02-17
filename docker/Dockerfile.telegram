@@ -1,0 +1,22 @@
+# =============================================================================
+# KORGAN AI — Telegram Bot Service
+# =============================================================================
+FROM python:3.12-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-telegram.txt .
+RUN pip install --no-cache-dir -r requirements-telegram.txt
+
+COPY telegram/ ./telegram/
+COPY config/ ./config/
+
+RUN useradd -m -s /bin/bash korgan && \
+    chown -R korgan:korgan /app
+USER korgan
+
+CMD ["python", "-m", "telegram.bot"]

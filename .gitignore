@@ -1,0 +1,67 @@
+# =============================================================================
+# KORGAN AI — Git Ignore
+# =============================================================================
+
+# --- Environment & Secrets ---
+.env
+*.key
+*.pem
+credentials.json
+secrets/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+venv/
+.venv/
+
+# --- Node / Desktop ---
+desktop/node_modules/
+desktop/dist/
+desktop/out/
+desktop/.vite/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Data ---
+data/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Docker ---
+docker-compose.override.yml
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# --- Voice/Vision data ---
+voice-data/
+vision-data/
+*.wav
+*.mp3
+*.ogg
+embeddings/*.json
+
+# --- Coverage ---
+htmlcov/
+.coverage
+coverage.xml

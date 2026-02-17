@@ -1,0 +1,38 @@
+# =============================================================================
+# KORGAN AI — Voice Service (Whisper + Piper TTS + Speaker ID)
+# =============================================================================
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3-pip \
+    python3.12-venv \
+    ffmpeg \
+    libsndfile1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements-voice.txt .
+RUN pip install --no-cache-dir -r requirements-voice.txt
+
+# Copy voice module
+COPY voice/ ./voice/
+
+# Create directories
+RUN mkdir -p /app/models /app/voice-data
+
+# Create non-root user
+RUN useradd -m -s /bin/bash korgan && \
+    chown -R korgan:korgan /app
+USER korgan
+
+EXPOSE 8001
+
+CMD ["uvicorn", "voice.service:app", "--host", "0.0.0.0", "--port", "8001"]

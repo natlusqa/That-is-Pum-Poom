@@ -1,0 +1,195 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "KORGAN AI — Permission Matrix",
+    "owner": "Amanat Korgan",
+    "last_updated": "2025-01-01T00:00:00Z"
+  },
+  "agents": {
+    "git_agent": {
+      "description": "Git repository operations",
+      "risk_level": "medium",
+      "allowed_actions": [
+        "analyze_diff",
+        "generate_patch",
+        "dry_run",
+        "review_code",
+        "log_history",
+        "status",
+        "list_branches"
+      ],
+      "approval_required": [
+        "commit",
+        "push",
+        "create_branch",
+        "merge",
+        "checkout",
+        "stash"
+      ],
+      "forbidden": [
+        "force_push",
+        "delete_branch_remote",
+        "rebase_remote",
+        "reset_hard",
+        "clean_untracked"
+      ],
+      "constraints": {
+        "max_files_per_commit": 50,
+        "max_diff_size_kb": 500,
+        "allowed_remotes": ["origin"],
+        "protected_branches": ["main", "master", "production"]
+      }
+    },
+    "powershell_agent": {
+      "description": "Windows system command execution",
+      "risk_level": "high",
+      "allowed_paths": [
+        "C:\\Users\\User\\Projects",
+        "C:\\Users\\User\\Documents",
+        "C:\\temp",
+        "C:\\project on my Local PC"
+      ],
+      "forbidden_paths": [
+        "C:\\Windows",
+        "C:\\Program Files",
+        "C:\\Program Files (x86)",
+        "C:\\ProgramData",
+        "C:\\Recovery",
+        "C:\\$Recycle.Bin"
+      ],
+      "allowed_commands_patterns": [
+        "^Get-.*",
+        "^Test-.*",
+        "^Write-Output",
+        "^Select-Object",
+        "^Where-Object",
+        "^Sort-Object",
+        "^Measure-Object",
+        "^ConvertTo-Json",
+        "^ConvertFrom-Json",
+        "^Out-File",
+        "^New-Item -ItemType Directory",
+        "^Copy-Item",
+        "^Move-Item"
+      ],
+      "approval_required_patterns": [
+        "^Set-.*",
+        "^Install-.*",
+        "^Start-Service",
+        "^Stop-Service",
+        "^Restart-Service",
+        "^Start-Process",
+        "^Stop-Process",
+        "^Remove-Item",
+        "^Rename-Item"
+      ],
+      "forbidden_commands": [
+        "Remove-Item -Recurse C:\\",
+        "Format-Volume",
+        "Clear-EventLog",
+        "Set-ExecutionPolicy Unrestricted",
+        "Invoke-Expression",
+        "New-PSDrive",
+        "Remove-PSDrive",
+        "Clear-Content",
+        "Clear-RecycleBin -Force"
+      ],
+      "constraints": {
+        "timeout_seconds": 30,
+        "max_output_size_kb": 1024,
+        "max_concurrent_commands": 3,
+        "log_all_commands": true
+      }
+    },
+    "code_agent": {
+      "description": "Code analysis, review, and modification",
+      "risk_level": "low",
+      "allowed_actions": [
+        "analyze_project",
+        "find_bugs",
+        "suggest_fixes",
+        "explain_code",
+        "score_quality",
+        "search_code",
+        "generate_documentation"
+      ],
+      "approval_required": [
+        "apply_fix",
+        "generate_tests",
+        "refactor",
+        "create_file",
+        "delete_file"
+      ],
+      "forbidden": [
+        "modify_config_files",
+        "modify_env_files",
+        "modify_security_files"
+      ],
+      "constraints": {
+        "max_file_size_kb": 500,
+        "allowed_extensions": [
+          ".py", ".js", ".ts", ".tsx", ".jsx", ".json", ".yaml", ".yml",
+          ".md", ".txt", ".html", ".css", ".scss", ".sql", ".sh", ".ps1",
+          ".toml", ".cfg", ".ini", ".xml", ".env.example"
+        ],
+        "forbidden_extensions": [
+          ".exe", ".dll", ".bin", ".dat", ".key", ".pem", ".env"
+        ]
+      }
+    },
+    "system_agent": {
+      "description": "System monitoring and management",
+      "risk_level": "medium",
+      "allowed_actions": [
+        "monitor_resources",
+        "health_check",
+        "list_processes",
+        "list_services",
+        "disk_usage",
+        "network_status"
+      ],
+      "approval_required": [
+        "cleanup_temp",
+        "cleanup_logs",
+        "manage_docker",
+        "backup_config",
+        "restart_service"
+      ],
+      "forbidden": [
+        "shutdown",
+        "restart_system",
+        "modify_firewall",
+        "modify_registry",
+        "format_disk"
+      ],
+      "constraints": {
+        "max_cleanup_size_mb": 500,
+        "backup_retention_days": 30,
+        "monitoring_interval_seconds": 60
+      }
+    }
+  },
+  "global": {
+    "max_api_cost_daily_usd": 5.00,
+    "max_api_cost_monthly_usd": 100.00,
+    "max_commands_per_minute": 10,
+    "max_commands_per_hour": 200,
+    "max_loop_iterations": 50,
+    "max_agent_chain_depth": 5,
+    "require_human_for_critical": true,
+    "audit_retention_days": 90,
+    "rollback_retention_hours": 24,
+    "session_timeout_minutes": 480,
+    "emergency_stop_enabled": true,
+    "notification_channels": ["telegram", "desktop"]
+  },
+  "owner": {
+    "name": "Amanat Korgan",
+    "address": "Мистер Корган",
+    "telegram_id": null,
+    "face_enrolled": false,
+    "voice_enrolled": false,
+    "authentication_methods": ["telegram_token", "face_recognition", "voice_recognition"],
+    "authentication_required_for": ["critical_actions", "permission_changes", "autonomy_level_change"]
+  }
+}

@@ -1,0 +1,38 @@
+# =============================================================================
+# KORGAN AI — Vision Service (Face Recognition)
+# =============================================================================
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+WORKDIR /app
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.12 \
+    python3-pip \
+    python3.12-venv \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python dependencies
+COPY requirements-vision.txt .
+RUN pip install --no-cache-dir -r requirements-vision.txt
+
+# Copy vision module
+COPY vision/ ./vision/
+
+# Create directories
+RUN mkdir -p /app/vision-data
+
+# Create non-root user
+RUN useradd -m -s /bin/bash korgan && \
+    chown -R korgan:korgan /app
+USER korgan
+
+EXPOSE 8002
+
+CMD ["uvicorn", "vision.service:app", "--host", "0.0.0.0", "--port", "8002"]

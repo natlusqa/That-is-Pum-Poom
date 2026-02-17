@@ -1,0 +1,236 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "KORGAN AI — System Configuration"
+  },
+  "identity": {
+    "name": "KORGAN",
+    "codename": "KORGAN AI",
+    "version": "1.0.0",
+    "creator": "Amanat Korgan",
+    "creator_address": "Мистер Корган",
+    "personality": {
+      "tone": "strategic, calm, concise, respectful",
+      "verbosity": "minimal",
+      "explain_decisions": true,
+      "suggest_improvements": true,
+      "log_reasoning": true
+    }
+  },
+  "llm": {
+    "local": {
+      "provider": "ollama",
+      "host": "http://ollama:11434",
+      "models": {
+        "primary": {
+          "name": "mistral:7b-instruct-v0.3-q4_K_M",
+          "use_for": ["general", "conversation", "analysis"],
+          "max_context": 8192,
+          "temperature": 0.7
+        },
+        "code": {
+          "name": "deepseek-coder-v2:16b-lite-instruct-q4_0",
+          "use_for": ["code_analysis", "code_generation", "code_review"],
+          "max_context": 16384,
+          "temperature": 0.3
+        },
+        "embedding": {
+          "name": "nomic-embed-text",
+          "use_for": ["embeddings"],
+          "dimensions": 768
+        }
+      },
+      "fallback_order": ["primary", "code"]
+    },
+    "cloud": {
+      "enabled": true,
+      "providers": {
+        "claude": {
+          "model": "claude-sonnet-4-20250514",
+          "use_for": ["complex_reasoning", "strategic_analysis", "long_context"],
+          "max_tokens": 4096,
+          "temperature": 0.7
+        },
+        "openai": {
+          "model": "gpt-4o",
+          "use_for": ["fallback"],
+          "max_tokens": 4096,
+          "temperature": 0.7
+        }
+      },
+      "routing": {
+        "complexity_threshold_for_cloud": 0.7,
+        "context_length_threshold": 4000,
+        "critical_actions_use_cloud": true,
+        "cost_aware": true
+      }
+    }
+  },
+  "memory": {
+    "redis": {
+      "ttl_working_memory_seconds": 3600,
+      "ttl_session_seconds": 28800,
+      "max_memory_mb": 512
+    },
+    "chromadb": {
+      "collection_prefix": "korgan_",
+      "retention_days": 30,
+      "similarity_threshold": 0.75,
+      "max_results": 10
+    },
+    "postgresql": {
+      "conversation_retention_days": -1,
+      "fact_retention_days": -1,
+      "audit_retention_days": 90,
+      "agent_action_retention_days": 30
+    },
+    "compression": {
+      "enabled": true,
+      "schedule_cron": "0 3 * * *",
+      "compress_conversations_older_than_days": 7,
+      "compress_reasoning_older_than_days": 3,
+      "extract_facts": true,
+      "deduplicate_vectors": true
+    }
+  },
+  "voice": {
+    "stt": {
+      "engine": "faster-whisper",
+      "model_size": "medium",
+      "language": "ru",
+      "beam_size": 5,
+      "vad_filter": true
+    },
+    "tts": {
+      "engine": "piper",
+      "voice": "ru_RU-denis-medium",
+      "speed": 1.0,
+      "sample_rate": 22050
+    },
+    "speaker_recognition": {
+      "model": "ecapa_tdnn",
+      "threshold": 0.75,
+      "enrollment_phrases_count": 5,
+      "fallback_on_failure": "telegram_confirmation"
+    }
+  },
+  "vision": {
+    "face_detection": {
+      "model": "retinaface_r50",
+      "confidence_threshold": 0.8
+    },
+    "face_recognition": {
+      "model": "arcface_r100",
+      "similarity_threshold": 0.6,
+      "embedding_dimensions": 512,
+      "encryption": "AES-256-GCM",
+      "max_enrollment_faces": 5
+    },
+    "camera": {
+      "device_id": 0,
+      "resolution": [640, 480],
+      "fps": 15,
+      "auto_capture_interval_seconds": 30
+    }
+  },
+  "desktop": {
+    "overlay": {
+      "enabled": true,
+      "glow_color": "#0066FF",
+      "glow_intensity": 0.8,
+      "glow_width_px": 4,
+      "animation_fps": 30
+    },
+    "states": {
+      "idle": {"glow": false, "color": "#0066FF"},
+      "listening": {"glow": true, "color": "#0088FF", "animation": "pulse"},
+      "thinking": {"glow": true, "color": "#0066FF", "animation": "particles"},
+      "speaking": {"glow": true, "color": "#00AAFF", "animation": "wave"},
+      "alert": {"glow": true, "color": "#FF8800", "animation": "pulse"},
+      "crisis": {"glow": true, "color": "#FF0000", "animation": "flash"}
+    },
+    "action_log": {
+      "max_visible_items": 20,
+      "auto_scroll": true,
+      "show_timestamps": true
+    }
+  },
+  "telegram": {
+    "commands": [
+      {"command": "start", "description": "Инициализация"},
+      {"command": "status", "description": "Статус системы"},
+      {"command": "mode", "description": "Уровень автономности"},
+      {"command": "agents", "description": "Статус агентов"},
+      {"command": "memory", "description": "Состояние памяти"},
+      {"command": "rollback", "description": "Откатить действие"},
+      {"command": "strategy", "description": "Стратегический режим"},
+      {"command": "crisis", "description": "Кризисный режим"},
+      {"command": "brief", "description": "Утренняя сводка"},
+      {"command": "stop", "description": "Экстренная остановка"}
+    ],
+    "notification_priority": {
+      "critical": "immediate",
+      "high": "immediate",
+      "medium": "batch_5min",
+      "low": "batch_15min"
+    }
+  },
+  "intelligence": {
+    "self_analysis": {
+      "enabled": true,
+      "schedule_cron": "0 2 * * *",
+      "review_window_hours": 24,
+      "min_actions_for_analysis": 10
+    },
+    "daily_brief": {
+      "enabled": true,
+      "schedule_cron": "0 8 * * *",
+      "delivery": "telegram",
+      "include": ["actions_summary", "project_status", "recommendations", "cost_report", "trends"]
+    },
+    "code_scoring": {
+      "enabled": true,
+      "metrics": ["complexity", "maintainability", "test_coverage", "security", "performance"],
+      "grading_scale": "A-F",
+      "track_trends": true
+    },
+    "predictive": {
+      "enabled": true,
+      "min_data_points": 50,
+      "prediction_window_hours": 24
+    },
+    "crisis_detection": {
+      "enabled": true,
+      "triggers": {
+        "consecutive_errors": 3,
+        "disk_usage_percent": 90,
+        "vram_usage_percent": 95,
+        "api_cost_percent": 90,
+        "unusual_activity_threshold": 3.0
+      },
+      "auto_downgrade_to_manual": true
+    },
+    "improvement": {
+      "enabled": true,
+      "schedule_cron": "0 4 * * 0",
+      "analyze_period_days": 7,
+      "generate_suggestions": true
+    }
+  },
+  "monitoring": {
+    "health_check_interval_seconds": 60,
+    "metrics_retention_days": 30,
+    "alert_channels": ["telegram", "desktop"],
+    "tracked_metrics": [
+      "api_latency_ms",
+      "llm_response_time_ms",
+      "memory_usage_mb",
+      "vram_usage_mb",
+      "disk_usage_gb",
+      "active_agents",
+      "requests_per_minute",
+      "error_rate",
+      "api_cost_usd"
+    ]
+  }
+}

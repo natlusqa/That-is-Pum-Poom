@@ -1,0 +1,274 @@
+# =============================================================================
+# KORGAN AI — Docker Compose Infrastructure
+# Personal AI Operating System for Mr. Korgan
+# =============================================================================
+
+x-common: &common
+  restart: unless-stopped
+  networks:
+    - korgan-net
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ===========================================================================
+  # CORE BRAIN — FastAPI + Agents + Orchestrator
+  # ===========================================================================
+  korgan-core:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.core
+    container_name: korgan-core
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./core:/app/core
+      - ./config:/app/config
+      - ./intelligence:/app/intelligence
+      - ./logs:/app/logs
+      - korgan-data:/app/data
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://korgan:${DB_PASSWORD}@postgresql:5432/korgan_ai
+      - REDIS_URL=redis://redis:6379/0
+      - CHROMADB_HOST=chromadb
+      - CHROMADB_PORT=8003
+      - OLLAMA_HOST=http://ollama:11434
+      - VOICE_SERVICE_URL=http://korgan-voice:8001
+      - VISION_SERVICE_URL=http://korgan-vision:8002
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OWNER_TELEGRAM_ID=${OWNER_TELEGRAM_ID}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - AUTONOMY_LEVEL=${AUTONOMY_LEVEL:-0}
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      chromadb:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ===========================================================================
+  # VOICE SERVICE — Whisper STT + Piper TTS + Speaker Recognition
+  # ===========================================================================
+  korgan-voice:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.voice
+    container_name: korgan-voice
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./voice:/app/voice
+      - korgan-voice-models:/app/models
+      - korgan-voice-data:/app/voice-data
+    environment:
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
+      - DEVICE=cuda
+      - REDIS_URL=redis://redis:6379/1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # VISION SERVICE — Face Detection + Recognition
+  # ===========================================================================
+  korgan-vision:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.vision
+    container_name: korgan-vision
+    ports:
+      - "8002:8002"
+    volumes:
+      - ./vision:/app/vision
+      - korgan-vision-data:/app/vision-data
+    environment:
+      - DEVICE=cuda
+      - REDIS_URL=redis://redis:6379/2
+      - FACE_THRESHOLD=${FACE_THRESHOLD:-0.6}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8002/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===========================================================================
+  # TELEGRAM BOT
+  # ===========================================================================
+  korgan-telegram:
+    <<: *common
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.telegram
+    container_name: korgan-telegram
+    volumes:
+      - ./telegram:/app/telegram
+      - ./config:/app/config
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OWNER_TELEGRAM_ID=${OWNER_TELEGRAM_ID}
+      - CORE_API_URL=http://korgan-core:8000
+      - CORE_WS_URL=ws://korgan-core:8000/ws
+      - VOICE_SERVICE_URL=http://korgan-voice:8001
+      - REDIS_URL=redis://redis:6379/3
+    depends_on:
+      korgan-core:
+        condition: service_healthy
+
+  # ===========================================================================
+  # OLLAMA — Local LLM Runtime
+  # ===========================================================================
+  ollama:
+    <<: *common
+    image: ollama/ollama:latest
+    container_name: korgan-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - korgan-ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=2
+
+  # ===========================================================================
+  # POSTGRESQL — Long-term Memory
+  # ===========================================================================
+  postgresql:
+    <<: *common
+    image: postgres:16-alpine
+    container_name: korgan-postgresql
+    ports:
+      - "5432:5432"
+    volumes:
+      - korgan-pgdata:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_DB=korgan_ai
+      - POSTGRES_USER=korgan
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U korgan -d korgan_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # REDIS — Cache + Event Bus + Session
+  # ===========================================================================
+  redis:
+    <<: *common
+    image: redis:7-alpine
+    container_name: korgan-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - korgan-redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ===========================================================================
+  # CHROMADB — Vector Memory
+  # ===========================================================================
+  chromadb:
+    <<: *common
+    image: chromadb/chroma:latest
+    container_name: korgan-chromadb
+    ports:
+      - "8003:8000"
+    volumes:
+      - korgan-chroma-data:/chroma/chroma
+    environment:
+      - ANONYMIZED_TELEMETRY=FALSE
+      - ALLOW_RESET=FALSE
+
+  # ===========================================================================
+  # N8N — Workflow Automation
+  # ===========================================================================
+  n8n:
+    <<: *common
+    image: n8nio/n8n:latest
+    container_name: korgan-n8n
+    ports:
+      - "5678:5678"
+    volumes:
+      - korgan-n8n-data:/home/node/.n8n
+      - ./n8n/workflows:/home/node/workflows
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=true
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD}
+      - WEBHOOK_URL=http://korgan-core:8000/webhooks/n8n
+
+# =============================================================================
+# VOLUMES
+# =============================================================================
+volumes:
+  korgan-data:
+    name: korgan-data
+  korgan-pgdata:
+    name: korgan-pgdata
+  korgan-redis-data:
+    name: korgan-redis-data
+  korgan-chroma-data:
+    name: korgan-chroma-data
+  korgan-ollama-models:
+    name: korgan-ollama-models
+  korgan-voice-models:
+    name: korgan-voice-models
+  korgan-voice-data:
+    name: korgan-voice-data
+  korgan-vision-data:
+    name: korgan-vision-data
+  korgan-n8n-data:
+    name: korgan-n8n-data
+
+# =============================================================================
+# NETWORKS
+# =============================================================================
+networks:
+  korgan-net:
+    name: korgan-net
+    driver: bridge
