@@ -1,0 +1,21 @@
+.app-layout {
+  display: flex;
+  min-height: 100vh;
+  background: var(--bg-primary);
+}
+
+.app-content {
+  flex: 1;
+  min-width: 0;
+  padding: 0 0 32px;
+}
+
+@media (max-width: 900px) {
+  .app-layout {
+    flex-direction: column;
+  }
+
+  .app-content {
+    padding-bottom: 24px;
+  }
+}

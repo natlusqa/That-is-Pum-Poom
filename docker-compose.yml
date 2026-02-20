@@ -1,0 +1,88 @@
+services:
+  # 1. PostgreSQL Database (production)
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_DB: surveillance
+      POSTGRES_USER: surveillance
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-surveillance_secure_pwd}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U surveillance"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. BACKEND API: Flask
+  backend:
+    build: ./backend
+    restart: always
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./backend/instance:/app/instance
+      - ./ml_models_cache:/root/.insightface/models
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLASK_PORT=5002
+      - SECRET_KEY=${SECRET_KEY:-change-this-in-production}
+      - DATABASE_URL=postgresql://surveillance:${POSTGRES_PASSWORD:-surveillance_secure_pwd}@postgres:5432/surveillance
+      - FACE_MODEL=${FACE_MODEL:-buffalo_l}
+      - FACE_THRESHOLD=${FACE_THRESHOLD:-0.5}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-surveillance-internal-key}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python app.py
+
+  # 3. FRONTEND: React + Nginx
+  frontend:
+    build: ./frontend
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - backend
+      - go2rtc
+
+  # 4. go2rtc: RTSP -> MJPEG/MP4/WebRTC bridge
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    restart: always
+    volumes:
+      - ./go2rtc/go2rtc.yaml:/config/go2rtc.yaml
+
+  # 5. TELEGRAM BOT: JARVIS-style interface
+  telegram-bot:
+    build: ./backend
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_BOT_PASSWORD=${TELEGRAM_BOT_PASSWORD:-jarvis2024}
+      - API_BASE_URL=http://backend:5002
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY:-surveillance-internal-key}
+      - SESSION_TIMEOUT=${SESSION_TIMEOUT:-3600}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      - backend
+    command: python telegram_bot.py
+
+  # WORKER: Runs LOCALLY on machine with camera access
+  # cd backend && python3 worker_multiproc.py
+  # Environment variables:
+  #   API_BASE_URL=http://server-ip:5002
+  #   FACE_THRESHOLD=0.5
+  #   FACE_COOLDOWN=60
+  #   FRAME_SKIP=2
+  #   MAX_WORKERS=10
+
+volumes:
+  pgdata:

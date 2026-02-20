@@ -1,0 +1,44 @@
+# --- Python ---
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# --- Node ---
+node_modules/
+.npm
+
+# --- Build artifacts ---
+frontend/dist/
+backend/build/
+
+# --- Database ---
+*.db
+*.sqlite
+backend/instance/
+
+# --- ML Models (large files, downloaded at runtime) ---
+ml_models_cache/
+
+# --- Environment & Secrets ---
+.env
+.env.local
+.env.production
+
+# --- Logs & Reports ---
+*.log
+*.csv
+*.xlsx
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo

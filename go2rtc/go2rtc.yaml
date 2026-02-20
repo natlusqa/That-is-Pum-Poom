@@ -1,0 +1,18 @@
+log:
+  level: info
+
+api:
+  listen: ":1984"
+
+rtsp:
+  listen: ":8554"
+
+webrtc:
+  listen: ":8555"
+
+mjpeg:
+  listen: ":8556"
+
+streams:
+  camera-11: "ffmpeg:rtsp://192.168.10.59:554/user=Qwerty123&password=Qwerty888&channel=20&stream=0.sdp?#video=mjpeg"
+
