@@ -1,15 +1,13 @@
-import { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
-  FiHome, FiVideo, FiUsers, FiClock, FiSearch, FiFilm,
-  FiUserCheck, FiLogOut, FiChevronLeft, FiChevronRight, FiShield
+  FiHome, FiVideo, FiUsers, FiClock, FiFilm,
+  FiUserCheck, FiLogOut, FiShield, FiSun, FiMoon, FiActivity
 } from 'react-icons/fi';
 import { authAPI } from '../services/api';
 import './Navbar.css';
 
-const Navbar = ({ user, onLogout }) => {
+const Navbar = ({ user, onLogout, theme = 'dark', onToggleTheme }) => {
   const navigate = useNavigate();
-  const [collapsed, setCollapsed] = useState(false);
 
   const handleLogout = () => {
     if (onLogout) {
@@ -26,13 +24,13 @@ const Navbar = ({ user, onLogout }) => {
   const canManageUsers = ['admin', 'super_admin'].includes(role);
 
   const roleLabel = role === 'super_admin'
-    ? 'Super Admin'
+    ? 'Супер админ'
     : role === 'admin'
-      ? 'Admin'
+      ? 'Админ'
       : role === 'hr'
-        ? 'HR'
+        ? 'Кадры'
         : role === 'employee'
-          ? 'Employee'
+          ? 'Сотрудник'
           : role || '';
 
   const userInitial = user?.username
@@ -40,16 +38,7 @@ const Navbar = ({ user, onLogout }) => {
     : '?';
 
   return (
-    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
-      {/* Collapse toggle */}
-      <button
-        className="sidebar-toggle"
-        onClick={() => setCollapsed(!collapsed)}
-        title={collapsed ? 'Expand' : 'Collapse'}
-      >
-        {collapsed ? <FiChevronRight /> : <FiChevronLeft />}
-      </button>
-
+    <aside className="sidebar">
       {/* Brand */}
       <div className="sidebar-brand">
         <div className="sidebar-logo">
@@ -57,19 +46,19 @@ const Navbar = ({ user, onLogout }) => {
         </div>
         <div className="sidebar-brand-text">
           <div className="sidebar-brand-name">Surveillance AI</div>
-          <div className="sidebar-brand-sub">Smart Monitoring</div>
+          <div className="sidebar-brand-sub">Умный мониторинг</div>
         </div>
       </div>
 
       {/* Navigation */}
       <nav className="sidebar-nav">
-        <div className="sidebar-section-label">Main</div>
+        <div className="sidebar-section-label">Основное</div>
 
         <NavLink to="/" end className={({ isActive }) =>
           `sidebar-nav-link ${isActive ? 'active' : ''}`
         }>
           <FiHome />
-          <span className="sidebar-nav-label">Dashboard</span>
+          <span className="sidebar-nav-label">Панель</span>
         </NavLink>
 
         {canManageCameras && (
@@ -77,27 +66,18 @@ const Navbar = ({ user, onLogout }) => {
             `sidebar-nav-link ${isActive ? 'active' : ''}`
           }>
             <FiVideo />
-            <span className="sidebar-nav-label">Cameras</span>
+            <span className="sidebar-nav-label">Камеры</span>
           </NavLink>
         )}
 
-        {canManageCameras && (
-          <NavLink to="/camera-discovery" className={({ isActive }) =>
-            `sidebar-nav-link ${isActive ? 'active' : ''}`
-          }>
-            <FiSearch />
-            <span className="sidebar-nav-label">Discovery</span>
-          </NavLink>
-        )}
-
-        <div className="sidebar-section-label">HR</div>
+        <div className="sidebar-section-label">Кадры</div>
 
         {canManageEmployees && (
           <NavLink to="/employees" className={({ isActive }) =>
             `sidebar-nav-link ${isActive ? 'active' : ''}`
           }>
             <FiUsers />
-            <span className="sidebar-nav-label">Employees</span>
+            <span className="sidebar-nav-label">Сотрудники</span>
           </NavLink>
         )}
 
@@ -105,24 +85,30 @@ const Navbar = ({ user, onLogout }) => {
           `sidebar-nav-link ${isActive ? 'active' : ''}`
         }>
           <FiClock />
-          <span className="sidebar-nav-label">Attendance</span>
+          <span className="sidebar-nav-label">Посещаемость</span>
         </NavLink>
 
         <NavLink to="/recordings" className={({ isActive }) =>
           `sidebar-nav-link ${isActive ? 'active' : ''}`
         }>
           <FiFilm />
-          <span className="sidebar-nav-label">Recordings</span>
+          <span className="sidebar-nav-label">Записи</span>
         </NavLink>
 
         {canManageUsers && (
           <>
-            <div className="sidebar-section-label">System</div>
+            <div className="sidebar-section-label">Система</div>
+            <NavLink to="/login-history" className={({ isActive }) =>
+              `sidebar-nav-link ${isActive ? 'active' : ''}`
+            }>
+              <FiActivity />
+              <span className="sidebar-nav-label">История входов</span>
+            </NavLink>
             <NavLink to="/users" className={({ isActive }) =>
               `sidebar-nav-link ${isActive ? 'active' : ''}`
             }>
               <FiUserCheck />
-              <span className="sidebar-nav-label">Users</span>
+              <span className="sidebar-nav-label">Пользователи</span>
             </NavLink>
           </>
         )}
@@ -139,10 +125,18 @@ const Navbar = ({ user, onLogout }) => {
         </div>
       )}
 
+      {/* Theme toggle */}
+      <button className="sidebar-theme-toggle" onClick={onToggleTheme} title="Переключить тему">
+        {theme === 'dark' ? <FiSun /> : <FiMoon />}
+        <span className="sidebar-theme-label">
+          {theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}
+        </span>
+      </button>
+
       {/* Logout */}
       <button className="sidebar-logout" onClick={handleLogout}>
         <FiLogOut />
-        <span className="sidebar-logout-label">Logout</span>
+        <span className="sidebar-logout-label">Выход</span>
       </button>
     </aside>
   );

@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiVideo, FiPlus, FiEdit2, FiTrash2, FiEye } from 'react-icons/fi';
+import { FiVideo, FiPlus, FiEdit2, FiTrash2, FiEye, FiSearch } from 'react-icons/fi';
 import { Link } from 'react-router-dom';
 import { cameraAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
@@ -198,15 +198,20 @@ function Cameras() {
       <div className="container">
         <div className="page-header flex-between">
           <h1><FiVideo /> Управление камерами</h1>
-          <button
-            onClick={() => {
-              resetForm();
-              setShowModal(true);
-            }}
-            className="btn btn-primary"
-          >
-            <FiPlus /> Добавить камеру
-          </button>
+          <div className="btn-group">
+            <Link to="/camera-discovery" className="btn btn-secondary">
+              <FiSearch /> Поиск камер
+            </Link>
+            <button
+              onClick={() => {
+                resetForm();
+                setShowModal(true);
+              }}
+              className="btn btn-primary"
+            >
+              <FiPlus /> Добавить камеру
+            </button>
+          </div>
         </div>
 
         {error && (

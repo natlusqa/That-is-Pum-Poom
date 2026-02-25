@@ -54,7 +54,7 @@ export const cameraAPI = {
 
 // --- EMPLOYEES ---
 export const employeeAPI = {
-  getAll: () => api.get('/employees'),
+  getAll: (params) => api.get('/employees', { params }),
   getById: (id) => api.get(`/employees/${id}`),
   create: (formData) =>
     api.post('/employees', formData, {
@@ -86,6 +86,11 @@ export const userAPI = {
   create: (data) => api.post('/users', data),
   update: (id, data) => api.put(`/users/${id}`, data),
   delete: (id) => api.delete(`/users/${id}`),
+};
+
+// --- AUDIT ---
+export const auditAPI = {
+  getLoginHistory: (params) => api.get('/audit/logins', { params }),
 };
 
 // --- HEALTH ---

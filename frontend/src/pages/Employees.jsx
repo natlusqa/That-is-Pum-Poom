@@ -1,18 +1,37 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { FiUsers, FiPlus, FiTrash2, FiCamera, FiUser } from 'react-icons/fi';
+import { FiUsers, FiPlus, FiTrash2, FiUser, FiEdit2, FiRefreshCw } from 'react-icons/fi';
 import { employeeAPI, departmentAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
+import { useAuthImage } from '../hooks/useAuthImage';
 import './Employees.css';
+
+function EmployeeAvatar({ emp, getEmployeePhotoUrl }) {
+  const imageUrl = emp.photo_path ? getEmployeePhotoUrl(emp.photo_path) : '';
+  const { blobUrl, error } = useAuthImage(imageUrl);
+
+  if (blobUrl && !error) {
+    return (
+      <img
+        src={blobUrl}
+        alt={emp.name || 'Сотрудник'}
+        className="employee-avatar-img"
+      />
+    );
+  }
+
+  return <FiUser />;
+}
 
 function Employees({ user }) {
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
   const [departments, setDepartments] = useState([]);
   const [showModal, setShowModal] = useState(false);
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [photoLoadErrorById, setPhotoLoadErrorById] = useState({});
   const { addToast } = useToast();
 
   const [formData, setFormData] = useState({
@@ -20,6 +39,11 @@ function Employees({ user }) {
     position: '',
     department: '',
     photo: null, // FILE
+  });
+  const [editFormData, setEditFormData] = useState({
+    name: '',
+    position: '',
+    department: '',
   });
 
   const [photoPreview, setPhotoPreview] = useState(null);
@@ -30,7 +54,7 @@ function Employees({ user }) {
 
   const loadEmployees = async () => {
     try {
-      const res = await employeeAPI.getAll();
+      const res = await employeeAPI.getAll({ include_inactive: true });
       setEmployees(res.data);
     } catch {
       setError('Ошибка загрузки сотрудников');
@@ -116,8 +140,74 @@ function Employees({ user }) {
     }
   };
 
+  const openEditModal = (emp) => {
+    setEditingEmployee(emp);
+    setEditFormData({
+      name: emp.name || '',
+      position: emp.position || '',
+      department: emp.department || '',
+    });
+    setShowEditModal(true);
+  };
+
+  const handleEditInputChange = (e) => {
+    setEditFormData(prev => ({
+      ...prev,
+      [e.target.name]: e.target.value,
+    }));
+  };
+
+  const handleEditSubmit = async (e) => {
+    e.preventDefault();
+    if (!editingEmployee) return;
+
+    setError('');
+    setSuccess('');
+
+    try {
+      await employeeAPI.update(editingEmployee.id, {
+        name: editFormData.name,
+        position: editFormData.position,
+        department: editFormData.department,
+      });
+      setSuccess('Данные сотрудника обновлены');
+      setShowEditModal(false);
+      setEditingEmployee(null);
+      Promise.all([loadEmployees(), loadDepartments()]);
+    } catch (err) {
+      setError(err.response?.data?.error || 'Ошибка при редактировании');
+      addToast(err.response?.data?.error || 'Ошибка при редактировании', 'error');
+    }
+  };
+
+  const handleDeactivate = async (id) => {
+    if (!window.confirm('Деактивировать сотрудника?')) return;
+
+    try {
+      await employeeAPI.update(id, { active: false });
+      setSuccess('Сотрудник деактивирован');
+      loadEmployees();
+    } catch {
+      setError('Ошибка деактивации');
+      addToast('Ошибка деактивации', 'error');
+    }
+  };
+
+  const handleActivate = async (id) => {
+    if (!window.confirm('Активировать сотрудника?')) return;
+
+    try {
+      await employeeAPI.update(id, { active: true });
+      setSuccess('Сотрудник активирован');
+      loadEmployees();
+    } catch {
+      setError('Ошибка активации');
+      addToast('Ошибка активации', 'error');
+    }
+  };
+
   const handleDelete = async (id) => {
-    if (!window.confirm('Удалить сотрудника?')) return;
+    if (!window.confirm('Удалить сотрудника навсегда?')) return;
 
     try {
       await employeeAPI.delete(id);
@@ -175,31 +265,44 @@ function Employees({ user }) {
             {departmentEmployees.map(emp => (
               <div key={emp.id} className="employee-card">
                 <div className="employee-avatar">
-                  {emp.photo_path && !photoLoadErrorById[emp.id] ? (
-                    <img
-                      src={getEmployeePhotoUrl(emp.photo_path)}
-                      alt={emp.name || 'Employee'}
-                      className="employee-avatar-img"
-                      onError={() => {
-                        setPhotoLoadErrorById((prev) => ({ ...prev, [emp.id]: true }));
-                      }}
-                    />
-                  ) : (
-                    <FiUser />
-                  )}
+                  <EmployeeAvatar emp={emp} getEmployeePhotoUrl={getEmployeePhotoUrl} />
                 </div>
                 <h3>{emp.name}</h3>
                 <p>ID: {emp.employee_id}</p>
                 <p>{emp.position || '—'}</p>
                 <p>{emp.department || '—'}</p>
+                <p>Статус: {emp.active ? 'Активен' : 'Неактивен'}</p>
 
                 {['hr', 'admin', 'super_admin'].includes(user?.role) && (
-                  <button
-                    className="btn btn-danger btn-sm"
-                    onClick={() => handleDelete(emp.id)}
-                  >
-                    <FiTrash2 /> Удалить
-                  </button>
+                  <div className="btn-group">
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => openEditModal(emp)}
+                    >
+                      <FiEdit2 /> Изменить
+                    </button>
+                    {emp.active ? (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleDeactivate(emp.id)}
+                      >
+                        <FiRefreshCw /> Деактивировать
+                      </button>
+                    ) : (
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => handleActivate(emp.id)}
+                      >
+                        <FiRefreshCw /> Активировать
+                      </button>
+                    )}
+                    <button
+                      className="btn btn-danger btn-sm"
+                      onClick={() => handleDelete(emp.id)}
+                    >
+                      <FiTrash2 /> Удалить
+                    </button>
+                  </div>
                 )}
               </div>
             ))}
@@ -276,6 +379,69 @@ function Employees({ user }) {
                 </button>
                 <button type="submit" className="btn btn-primary" disabled={submitting}>
                   {submitting ? 'Добавление...' : 'Добавить'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {showEditModal && editingEmployee && (
+        <div className="modal-overlay" onClick={() => setShowEditModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2 className="modal-title">Редактировать сотрудника</h2>
+              <button onClick={() => setShowEditModal(false)} className="btn btn-icon">×</button>
+            </div>
+
+            <form onSubmit={handleEditSubmit}>
+              <div className="modal-body">
+                <div className="form-group">
+                  <label className="form-label">ФИО *</label>
+                  <input
+                    name="name"
+                    className="form-control"
+                    value={editFormData.name}
+                    onChange={handleEditInputChange}
+                    required
+                  />
+                </div>
+
+                <div className="grid grid-2">
+                  <div className="form-group">
+                    <label className="form-label">Должность</label>
+                    <input
+                      name="position"
+                      className="form-control"
+                      value={editFormData.position}
+                      onChange={handleEditInputChange}
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Отдел</label>
+                    <input
+                      name="department"
+                      className="form-control"
+                      list="department-options"
+                      value={editFormData.department}
+                      onChange={handleEditInputChange}
+                      required
+                    />
+                    <datalist id="department-options">
+                      {departments.map((dep) => (
+                        <option key={dep.id} value={dep.name} />
+                      ))}
+                    </datalist>
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button type="button" onClick={() => setShowEditModal(false)} className="btn btn-secondary">
+                  Отмена
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  <FiEdit2 /> Сохранить
                 </button>
               </div>
             </form>

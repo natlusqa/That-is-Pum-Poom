@@ -237,6 +237,7 @@ def log_audit(action, resource_type=None, resource_id=None, details=None,
 
 # --- MEMORY CACHE ---
 face_cache = {'vectors': [], 'ids': [], 'names': []}
+DUPLICATE_FACE_THRESHOLD = float(os.environ.get('DUPLICATE_FACE_THRESHOLD', '0.7'))
 
 
 def load_face_db_to_memory():
@@ -272,6 +273,49 @@ def load_face_db_to_memory():
         logger.info(f"Face cache updated: {count} faces loaded")
     except Exception as e:
         logger.error(f"Cache update failed: {e}")
+
+
+def find_duplicate_employee_by_face(embedding):
+    """Return existing employee with similar face embedding, if any."""
+    try:
+        employees = Employee.query.all()
+        if not employees:
+            return None
+        query = np.array(embedding, dtype=np.float32)
+        query_norm = np.linalg.norm(query) + 1e-6
+
+        best_sim = -1.0
+        best_employee = None
+        for employee in employees:
+            vec = None
+            if employee.face_encoding_blob:
+                vec = np.frombuffer(employee.face_encoding_blob, dtype=np.float32)
+            elif employee.face_encoding:
+                try:
+                    vec = np.array(json.loads(employee.face_encoding), dtype=np.float32)
+                except Exception:
+                    vec = None
+            if vec is None or vec.shape[0] != 512:
+                continue
+
+            v = vec.astype(np.float32)
+            sim = float(np.dot(query, v) / ((np.linalg.norm(v) + 1e-6) * query_norm))
+            if sim > best_sim:
+                best_sim = sim
+                best_employee = employee
+
+        if best_employee is not None and best_sim >= DUPLICATE_FACE_THRESHOLD:
+            return {
+                'id': best_employee.id,
+                'name': best_employee.name,
+                'employee_id': best_employee.employee_id,
+                'active': bool(best_employee.active),
+                'similarity': best_sim,
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"Duplicate face check failed: {e}")
+        return None
 
 
 def generate_employee_id(department):
@@ -533,14 +577,34 @@ def login():
     data = request.get_json()
     if not data:
         return jsonify({'error': 'Invalid request'}), 400
-    user = User.query.filter_by(username=data.get('username')).first()
+    username = (data.get('username') or '').strip()
+    user = User.query.filter_by(username=username).first()
     if user and user.check_password(data.get('password', '')):
         token = jwt.encode({
             'user_id': user.id,
             'role': user.role,
             'exp': utc_now() + timedelta(hours=24)
         }, app.config['SECRET_KEY'], algorithm="HS256")
+        log_audit(
+            action='login_success',
+            resource_type='user',
+            resource_id=user.id,
+            details=f'User "{user.username}" logged in',
+            user_id=user.id,
+            username=user.username,
+            source='web'
+        )
         return jsonify({'token': token, 'user': {'username': user.username, 'role': user.role}})
+
+    log_audit(
+        action='login_failed',
+        resource_type='user',
+        resource_id=None,
+        details=f'Failed login attempt for username "{username}"',
+        user_id=None,
+        username=username or 'unknown',
+        source='web'
+    )
     return jsonify({'error': 'Invalid credentials'}), 401
 
 
@@ -690,6 +754,15 @@ def add_employee(current_user):
         if len(embedding) != 512:
             return jsonify({'error': f'Invalid face encoding length: {len(embedding)}'}), 400
 
+        duplicate = find_duplicate_employee_by_face(embedding)
+        if duplicate:
+            status_text = 'активный' if duplicate.get('active') else 'неактивный'
+            return jsonify({
+                'error': f"Сотрудник с таким фото уже существует: {duplicate['name']} (ID: {duplicate['employee_id']}, {status_text})",
+                'duplicate_employee_id': duplicate['id'],
+                'similarity': round(float(duplicate['similarity']), 3)
+            }), 409
+
         vector_json = json.dumps(embedding)
         vector_blob = np.array(embedding, dtype=np.float32).tobytes()
 
@@ -722,7 +795,14 @@ def add_employee(current_user):
 @app.route('/api/employees', methods=['GET'])
 @token_required
 def get_employees(current_user):
-    employees = Employee.query.filter_by(active=True).all()
+    include_inactive_raw = (request.args.get('include_inactive') or '').strip().lower()
+    include_inactive = include_inactive_raw in ('1', 'true', 'yes', 'on')
+    if include_inactive and current_user.role not in ('hr', 'admin', 'super_admin'):
+        return jsonify({'error': 'Insufficient permissions'}), 403
+    query = Employee.query
+    if not include_inactive:
+        query = query.filter_by(active=True)
+    employees = query.all()
     return jsonify([{
         'id': e.id,
         'name': e.name,
@@ -786,10 +866,10 @@ def update_employee(current_user, emp_id):
 
 @app.route('/api/employees/<int:emp_id>', methods=['DELETE'])
 @token_required
-@role_required('admin', 'super_admin')
+@role_required('admin', 'super_admin', 'hr')
 def delete_employee(current_user, emp_id):
     employee = Employee.query.get_or_404(emp_id)
-    employee.active = False
+    db.session.delete(employee)
     db.session.commit()
     load_face_db_to_memory()
     return jsonify({'message': 'Employee deleted'})
@@ -1494,6 +1574,53 @@ def get_camera_poster(current_user, camera_id):
     return jsonify({'error': 'Unable to capture poster frame'}), 503
 
 
+@app.route('/api/cameras/<int:camera_id>/last-frame', methods=['GET'])
+@token_required
+def get_camera_last_frame(current_user, camera_id):
+    """Return the most recent saved frame for camera (recording thumbnail or snapshot)."""
+    camera = Camera.query.get_or_404(camera_id)
+
+    # 1) Latest recording thumbnail from DB
+    latest_rec = Recording.query.filter(
+        Recording.camera_id == camera_id,
+        Recording.thumbnail_path.isnot(None)
+    ).order_by(Recording.start_time.desc(), Recording.id.desc()).first()
+
+    if latest_rec and latest_rec.thumbnail_path:
+        thumb_name = os.path.basename(latest_rec.thumbnail_path)
+        thumb_full_path = os.path.join(app.config['RECORDINGS_FOLDER'], thumb_name)
+        if os.path.exists(thumb_full_path):
+            return send_file(
+                thumb_full_path,
+                mimetype='image/jpeg',
+                headers={'Cache-Control': 'no-cache, max-age=0'}
+            )
+
+    # 2) Latest saved camera snapshot from disk
+    snapshots_folder = app.config['SNAPSHOTS_FOLDER']
+    prefix = f"camera_{camera_id}_"
+    try:
+        candidates = []
+        for name in os.listdir(snapshots_folder):
+            low = name.lower()
+            if name.startswith(prefix) and (low.endswith('.jpg') or low.endswith('.jpeg') or low.endswith('.png')):
+                full_path = os.path.join(snapshots_folder, name)
+                if os.path.isfile(full_path):
+                    candidates.append(full_path)
+
+        if candidates:
+            latest_path = max(candidates, key=os.path.getmtime)
+            return send_file(
+                latest_path,
+                mimetype='image/jpeg',
+                headers={'Cache-Control': 'no-cache, max-age=0'}
+            )
+    except Exception as e:
+        logger.debug(f"Failed to read snapshots for camera {camera_id}: {e}")
+
+    return jsonify({'error': f'No saved frame for camera {camera.id}'}), 404
+
+
 # --- INTERNAL SNAPSHOT (no auth, for telegram bot on same network) ---
 
 @app.route('/api/internal/cameras/<int:camera_id>/snapshot', methods=['GET'])
@@ -1570,6 +1697,15 @@ def internal_add_employee():
             return jsonify({'error': 'No face detected in photo'}), 400
         if len(embedding) != 512:
             return jsonify({'error': f'Invalid face encoding length: {len(embedding)}'}), 400
+
+        duplicate = find_duplicate_employee_by_face(embedding)
+        if duplicate:
+            status_text = 'active' if duplicate.get('active') else 'inactive'
+            return jsonify({
+                'error': f"Employee with similar face already exists: {duplicate['name']} (ID: {duplicate['employee_id']}, {status_text})",
+                'duplicate_employee_id': duplicate['id'],
+                'similarity': round(float(duplicate['similarity']), 3)
+            }), 409
 
         vector_json = json.dumps(embedding)
         vector_blob = np.array(embedding, dtype=np.float32).tobytes()
@@ -1897,6 +2033,42 @@ def get_audit_logs(current_user):
         'total': pagination.total,
         'pages': pagination.pages,
         'page': pagination.page
+    })
+
+
+@app.route('/api/audit/logins', methods=['GET'])
+@token_required
+@role_required('super_admin', 'admin')
+def get_login_audit_logs(current_user):
+    """View login history (admin only)"""
+    page = request.args.get('page', type=int, default=1)
+    per_page = request.args.get('per_page', type=int, default=50)
+    per_page = min(per_page, 200)
+
+    query = AuditLog.query.filter(AuditLog.action.in_(['login_success', 'login_failed']))
+
+    username = request.args.get('username', type=str)
+    if username:
+        query = query.filter(AuditLog.username.ilike(f"%{username.strip()}%"))
+
+    pagination = query.order_by(AuditLog.timestamp.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+
+    return jsonify({
+        'items': [{
+            'id': log.id,
+            'username': log.username,
+            'action': log.action,
+            'details': log.details,
+            'ip_address': log.ip_address,
+            'source': log.source,
+            'timestamp': log.timestamp.isoformat() if log.timestamp else None
+        } for log in pagination.items],
+        'total': pagination.total,
+        'pages': pagination.pages,
+        'page': pagination.page,
+        'per_page': per_page
     })
 
 
