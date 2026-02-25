@@ -90,9 +90,7 @@ function Login({ onLogin }) {
           </form>
 
           <div className="login-footer">
-            <p className="login-hint">
-              Default: <strong>admin</strong> / <strong>admin123</strong>
-            </p>
+            <p className="login-hint">Surveillance AI &mdash; Secure Access</p>
           </div>
         </div>
       </div>

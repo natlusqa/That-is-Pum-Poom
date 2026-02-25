@@ -35,6 +35,8 @@ services:
       - FACE_THRESHOLD=${FACE_THRESHOLD:-0.5}
       - INTERNAL_API_KEY=${INTERNAL_API_KEY:-surveillance-internal-key}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - GO2RTC_HOST=go2rtc
+      - GO2RTC_PORT=1984
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,7 +54,7 @@ services:
       - backend
       - go2rtc
 
-  # 4. go2rtc: RTSP -> MJPEG/MP4/WebRTC bridge
+  # 4. go2rtc: RTSP -> MSE/MJPEG/HLS bridge (low-latency streaming)
   go2rtc:
     image: alexxit/go2rtc:latest
     restart: always

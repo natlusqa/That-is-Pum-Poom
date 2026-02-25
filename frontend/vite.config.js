@@ -9,7 +9,18 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:5002',
         changeOrigin: true,
-      }
+      },
+      '/socket.io': {
+        target: 'http://localhost:5002',
+        changeOrigin: true,
+        ws: true,
+      },
+      '/go2rtc': {
+        target: 'http://localhost:1984',
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/go2rtc/, ''),
+      },
     }
   },
   build: {

@@ -105,7 +105,7 @@
 /* Camera Cards */
 .camera-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 16px;
   margin-bottom: 32px;
 }
@@ -128,8 +128,8 @@
 }
 
 .camera-preview {
-  height: 160px;
-  background: var(--color-bg-primary);
+  height: 180px;
+  background: #000;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -142,7 +142,30 @@
   content: '';
   position: absolute;
   inset: 0;
-  background: linear-gradient(180deg, transparent 60%, rgba(10, 14, 26, 0.8) 100%);
+  background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, 0.7) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Camera thumbnails */
+.camera-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.camera-thumb-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  background: var(--color-bg-primary);
+  color: var(--text-muted);
+  font-size: 0.75rem;
 }
 
 .camera-badge {

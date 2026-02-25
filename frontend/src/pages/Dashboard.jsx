@@ -1,9 +1,59 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
-import { FiVideo, FiMapPin, FiWifi, FiEye, FiUsers, FiActivity, FiPlus } from 'react-icons/fi';
+import {
+  FiVideo, FiMapPin, FiWifi, FiUsers, FiActivity, FiPlus,
+  FiCpu, FiRefreshCcw
+} from 'react-icons/fi';
 import { cameraAPI, employeeAPI, attendanceAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import './Dashboard.css';
+
+function CameraThumbnail({ cameraId, isOnline }) {
+  const [src, setSrc] = useState('');
+  const [error, setError] = useState(false);
+
+  const loadPoster = useCallback(() => {
+    if (!isOnline) return;
+    const token = localStorage.getItem('token');
+    fetch(`/api/cameras/${cameraId}/poster`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    })
+      .then(res => {
+        if (!res.ok) throw new Error('Failed');
+        return res.blob();
+      })
+      .then(blob => {
+        setSrc(prev => {
+          if (prev) URL.revokeObjectURL(prev);
+          return URL.createObjectURL(blob);
+        });
+        setError(false);
+      })
+      .catch(() => setError(true));
+  }, [cameraId, isOnline]);
+
+  useEffect(() => {
+    loadPoster();
+    if (isOnline) {
+      const interval = setInterval(loadPoster, 15000);
+      return () => {
+        clearInterval(interval);
+        if (src) URL.revokeObjectURL(src);
+      };
+    }
+  }, [loadPoster]);
+
+  if (!isOnline || error || !src) {
+    return (
+      <div className="camera-thumb-placeholder">
+        <FiVideo size={32} />
+        {!isOnline && <span>Offline</span>}
+      </div>
+    );
+  }
+
+  return <img src={src} alt="Camera feed" className="camera-thumb-img" />;
+}
 
 function Dashboard() {
   const [cameras, setCameras] = useState([]);
@@ -43,6 +93,7 @@ function Dashboard() {
   };
 
   const onlineCameras = cameras.filter(c => c.is_online).length;
+  const aiCameras = cameras.filter(c => c.face_recognition_enabled).length;
 
   if (loading) {
     return (
@@ -57,9 +108,14 @@ function Dashboard() {
       <div className="container">
         <div className="page-header flex-between">
           <h1><FiActivity /> Dashboard</h1>
-          <Link to="/cameras" className="btn btn-primary btn-sm">
-            <FiPlus /> Add Camera
-          </Link>
+          <div className="btn-group">
+            <button className="btn btn-secondary btn-sm" onClick={loadDashboard}>
+              <FiRefreshCcw /> Refresh
+            </button>
+            <Link to="/cameras" className="btn btn-primary btn-sm">
+              <FiPlus /> Add Camera
+            </Link>
+          </div>
         </div>
 
         {/* Stats */}
@@ -78,7 +134,7 @@ function Dashboard() {
             <div className="stat-content">
               <div className="stat-label">Online</div>
               <div className="stat-value">{onlineCameras}</div>
-              <div className="stat-sub">of {cameras.length} cameras</div>
+              <div className="stat-sub">of {cameras.length} total</div>
             </div>
           </div>
 
@@ -103,8 +159,13 @@ function Dashboard() {
 
         {/* Camera Grid */}
         <div className="dashboard-section-header">
-          <h2><FiVideo /> Cameras</h2>
-          <Link to="/cameras" className="btn btn-ghost btn-sm">View All</Link>
+          <h2><FiVideo /> Live Cameras</h2>
+          <div className="flex gap-2">
+            {aiCameras > 0 && (
+              <span className="badge badge-info"><FiCpu size={10} /> {aiCameras} AI</span>
+            )}
+            <Link to="/cameras" className="btn btn-ghost btn-sm">Manage</Link>
+          </div>
         </div>
 
         {cameras.length === 0 ? (
@@ -121,20 +182,20 @@ function Dashboard() {
             {cameras.map((camera) => (
               <Link key={camera.id} to={`/camera/${camera.id}`} className="camera-card">
                 <div className="camera-preview">
-                  <FiEye size={40} />
+                  <CameraThumbnail cameraId={camera.id} isOnline={camera.is_online} />
                   {camera.face_recognition_enabled && (
-                    <span className="badge badge-info camera-badge">AI</span>
+                    <span className="badge badge-info camera-badge"><FiCpu size={10} /> AI</span>
                   )}
                   <div className="camera-status-indicator">
-                    <span className={`status-dot ${camera.is_online ? 'status-dot-online' : 'status-dot-offline'}`}></span>
+                    <span className={`status-dot ${camera.is_online ? 'status-dot-online' : 'status-dot-offline'}`} />
                     {camera.is_online ? 'Online' : 'Offline'}
                   </div>
                 </div>
                 <div className="camera-info">
                   <h3>{camera.name}</h3>
                   <div className="camera-meta">
-                    <span><FiMapPin size={13} /> {camera.location || 'No location'}</span>
-                    <span><FiWifi size={13} /> {camera.ip_address}</span>
+                    {camera.location && <span><FiMapPin size={12} /> {camera.location}</span>}
+                    <span><FiWifi size={12} /> {camera.ip_address}</span>
                   </div>
                 </div>
               </Link>

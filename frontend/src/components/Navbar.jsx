@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
-  FiHome, FiVideo, FiUsers, FiClock, FiSearch,
+  FiHome, FiVideo, FiUsers, FiClock, FiSearch, FiFilm,
   FiUserCheck, FiLogOut, FiChevronLeft, FiChevronRight, FiShield
 } from 'react-icons/fi';
 import { authAPI } from '../services/api';
@@ -106,6 +106,13 @@ const Navbar = ({ user, onLogout }) => {
         }>
           <FiClock />
           <span className="sidebar-nav-label">Attendance</span>
+        </NavLink>
+
+        <NavLink to="/recordings" className={({ isActive }) =>
+          `sidebar-nav-link ${isActive ? 'active' : ''}`
+        }>
+          <FiFilm />
+          <span className="sidebar-nav-label">Recordings</span>
         </NavLink>
 
         {canManageUsers && (

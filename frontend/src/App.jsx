@@ -13,6 +13,7 @@ import Employees from './pages/Employees';
 import CameraView from './pages/CameraView';
 import Attendance from './pages/Attendance';
 import Users from './pages/Users';
+import Recordings from './pages/Playback';
 
 function App() {
   const [user, setUser] = useState(() => authAPI.getCurrentUser());
@@ -87,6 +88,7 @@ function App() {
             }
           />
           <Route path="attendance" element={<Attendance />} />
+          <Route path="recordings" element={<Recordings />} />
           <Route
             path="users"
             element={

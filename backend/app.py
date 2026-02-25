@@ -1446,6 +1446,54 @@ def get_saved_snapshot(current_user, filename):
     return send_from_directory(app.config['SNAPSHOTS_FOLDER'], safe_name)
 
 
+@app.route('/api/cameras/<int:camera_id>/poster', methods=['GET'])
+@token_required
+def get_camera_poster(current_user, camera_id):
+    """Fast poster frame via go2rtc (uses cached stream when available)."""
+    import requests as http_requests
+    camera = Camera.query.get_or_404(camera_id)
+    if not camera.active:
+        return jsonify({'error': 'Camera is inactive'}), 404
+
+    stream_url = camera.get_stream_url()
+    if not stream_url:
+        return jsonify({'error': 'No stream URL'}), 400
+
+    go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+    go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+    go2rtc_url = f"http://{go2rtc_host}:{go2rtc_port}/api/frame.jpeg?src={quote(stream_url, safe='')}"
+
+    try:
+        resp = http_requests.get(go2rtc_url, timeout=8)
+        if resp.status_code == 200 and resp.content:
+            return Response(
+                resp.content,
+                mimetype='image/jpeg',
+                headers={'Cache-Control': 'no-cache, max-age=0'}
+            )
+    except Exception as e:
+        logger.debug(f"go2rtc poster failed for camera {camera_id}: {e}")
+
+    # Fallback: capture via OpenCV
+    import cv2
+    try:
+        cap = cv2.VideoCapture(stream_url)
+        cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                return Response(buf.tobytes(), mimetype='image/jpeg',
+                                headers={'Cache-Control': 'no-cache, max-age=0'})
+        else:
+            cap.release()
+    except Exception as e:
+        logger.debug(f"OpenCV poster failed for camera {camera_id}: {e}")
+
+    return jsonify({'error': 'Unable to capture poster frame'}), 503
+
+
 # --- INTERNAL SNAPSHOT (no auth, for telegram bot on same network) ---
 
 @app.route('/api/internal/cameras/<int:camera_id>/snapshot', methods=['GET'])

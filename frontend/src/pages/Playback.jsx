@@ -123,7 +123,7 @@ function Playback() {
     <div className="page-container">
       <div className="container">
         <div className="page-header">
-          <h1><FiFilm /> Playback</h1>
+          <h1><FiFilm /> Recordings</h1>
         </div>
 
         {/* Filters */}
