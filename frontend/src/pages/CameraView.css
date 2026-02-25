@@ -1,37 +1,52 @@
+/* ================================================================
+   CAMERA VIEW — Live Streaming & Detection Overlay
+   ================================================================ */
+
 .camera-view-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   gap: 16px;
 }
 
 .camera-view-header h1 {
   flex: 1;
   text-align: center;
-  font-size: 1.75rem;
+  font-size: 1.5rem;
+  font-weight: 600;
 }
 
+/* Stream toolbar */
 .stream-toolbar {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
 
 .stream-actions {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
+.stream-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border-color);
+  margin: 0 4px;
+}
+
+/* Video container */
 .video-container {
-  background: var(--bg-secondary);
-  border-radius: 12px;
+  background: var(--color-bg-primary);
+  border-radius: var(--radius-lg);
   overflow: hidden;
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-lg);
+  position: relative;
 }
 
 .video-stream {
@@ -51,17 +66,19 @@
   color: var(--text-muted);
   padding: 24px;
   text-align: center;
+  font-size: 0.9375rem;
 }
 
+/* Stream info panel */
 .stream-info {
-  margin-top: 16px;
-  background: var(--bg-secondary);
-  border-radius: 12px;
+  margin-top: 12px;
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-lg);
   border: 1px solid var(--border-color);
-  padding: 16px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .stream-info-row {
@@ -74,31 +91,29 @@
 .stream-label {
   font-weight: 600;
   color: var(--text-secondary);
+  font-size: 0.8125rem;
+  white-space: nowrap;
 }
 
 .stream-url {
-  background: var(--bg-tertiary);
-  padding: 6px 10px;
-  border-radius: 8px;
+  background: var(--color-bg-primary);
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  font-size: 13px;
+  color: var(--accent-light);
+  font-size: 0.75rem;
   max-width: 100%;
   overflow-wrap: anywhere;
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .stream-hint {
   color: var(--text-muted);
-  font-size: 13px;
-  line-height: 1.4;
+  font-size: 0.75rem;
+  line-height: 1.5;
 }
 
-.stream-divider {
-  height: 1px;
-  background: var(--border-color);
-  margin: 16px 0;
-}
-
+/* Detection overlay */
 .video-overlay-container {
   position: relative;
   display: inline-block;
@@ -114,14 +129,14 @@
 
 .detection-toggle {
   padding: 8px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
-  background: var(--bg-secondary);
+  background: var(--color-bg-secondary);
   color: var(--text-primary);
   font-weight: 600;
-  font-size: 14px;
+  font-size: 0.8125rem;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all var(--transition-fast);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -129,20 +144,24 @@
 }
 
 .detection-toggle:hover {
-  background: var(--bg-tertiary);
-  border-color: var(--primary-blue);
-  color: var(--primary-blue);
+  background: var(--color-bg-tertiary);
+  border-color: var(--accent);
+  color: var(--accent-light);
 }
 
 .detection-toggle.active {
-  background: var(--primary-blue);
-  border-color: var(--primary-blue);
+  background: var(--accent);
+  border-color: var(--accent);
   color: white;
 }
 
 @media (max-width: 768px) {
   .camera-view-header h1 {
-    font-size: 1.25rem;
+    font-size: 1.125rem;
+  }
+
+  .camera-view-header {
+    flex-wrap: wrap;
   }
 
   .stream-info-row {

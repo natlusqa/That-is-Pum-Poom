@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { FiVideo, FiUser, FiLock, FiLogIn } from 'react-icons/fi';
+import { FiShield, FiUser, FiLock, FiLogIn } from 'react-icons/fi';
 import { authAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import './Login.css';
@@ -8,16 +8,11 @@ import './Login.css';
 function Login({ onLogin }) {
   const navigate = useNavigate();
   const { addToast } = useToast();
-  const [credentials, setCredentials] = useState({
-    username: '',
-    password: '',
-  });
-  const [error, setError] = useState('');
+  const [credentials, setCredentials] = useState({ username: '', password: '' });
   const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError('');
     setLoading(true);
 
     try {
@@ -30,18 +25,15 @@ function Login({ onLogin }) {
       }
       navigate('/');
     } catch (err) {
-      setError(err.response?.data?.error || 'Ошибка входа. Проверьте данные.');
-      addToast(err.response?.data?.error || 'Ошибка входа. Проверьте данные.', 'error');
+      const msg = err.response?.data?.error || 'Login failed. Check your credentials.';
+      addToast(msg, 'error');
     } finally {
       setLoading(false);
     }
   };
 
   const handleChange = (e) => {
-    setCredentials({
-      ...credentials,
-      [e.target.name]: e.target.value,
-    });
+    setCredentials({ ...credentials, [e.target.name]: e.target.value });
   };
 
   return (
@@ -49,21 +41,15 @@ function Login({ onLogin }) {
       <div className="login-container">
         <div className="login-card">
           <div className="login-header">
-            <FiVideo size={48} className="login-icon" />
-            <h1>Система видеонаблюдения</h1>
-            <p>с распознаванием лиц</p>
+            <FiShield size={48} className="login-icon" />
+            <h1>Surveillance AI</h1>
+            <p>Intelligent video monitoring system</p>
           </div>
-
-          {error && (
-            <div className="alert alert-error">
-              {error}
-            </div>
-          )}
 
           <form onSubmit={handleSubmit}>
             <div className="form-group">
               <label className="form-label">
-                <FiUser /> Имя пользователя
+                <FiUser size={14} /> Username
               </label>
               <input
                 type="text"
@@ -71,15 +57,16 @@ function Login({ onLogin }) {
                 className="form-control"
                 value={credentials.username}
                 onChange={handleChange}
-                placeholder="admin"
+                placeholder="Enter username"
                 required
                 autoFocus
+                autoComplete="username"
               />
             </div>
 
             <div className="form-group">
               <label className="form-label">
-                <FiLock /> Пароль
+                <FiLock size={14} /> Password
               </label>
               <input
                 type="password"
@@ -87,33 +74,24 @@ function Login({ onLogin }) {
                 className="form-control"
                 value={credentials.password}
                 onChange={handleChange}
-                placeholder="••••••••"
+                placeholder="Enter password"
                 required
+                autoComplete="current-password"
               />
             </div>
 
-            <button
-              type="submit"
-              className="btn btn-primary btn-block"
-              disabled={loading}
-            >
+            <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
               {loading ? (
-                <>
-                  <div className="spinner-small"></div>
-                  Вход...
-                </>
+                <><div className="spinner-small"></div> Signing in...</>
               ) : (
-                <>
-                  <FiLogIn />
-                  Войти
-                </>
+                <><FiLogIn /> Sign In</>
               )}
             </button>
           </form>
 
           <div className="login-footer">
             <p className="login-hint">
-              По умолчанию: <strong>admin</strong> / <strong>admin123</strong>
+              Default: <strong>admin</strong> / <strong>admin123</strong>
             </p>
           </div>
         </div>

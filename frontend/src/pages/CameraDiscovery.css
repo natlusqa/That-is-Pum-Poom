@@ -1,0 +1,237 @@
+/* ================================================================
+   CAMERA DISCOVERY — Dark Theme Network Scanner
+   ================================================================ */
+
+.discovery-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.discovery-header h1 {
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+/* Scan Panel */
+.discovery-panel {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  margin-bottom: 24px;
+}
+
+.discovery-panel h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text-primary);
+}
+
+.network-input-group {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.network-input {
+  flex: 1;
+  padding: 10px 14px;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-family: 'JetBrains Mono', monospace;
+  transition: all var(--transition-fast);
+}
+
+.network-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+.network-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.network-hint {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  margin-top: 10px;
+}
+
+/* Results */
+.discovery-results {
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border-color);
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.results-header h3 {
+  font-size: 0.9375rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.filter-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+/* Camera Groups */
+.camera-group {
+  border-bottom: 1px solid var(--border-color);
+}
+
+.camera-group:last-child {
+  border-bottom: none;
+}
+
+.group-header {
+  width: 100%;
+  padding: 12px 20px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--transition-fast);
+  display: flex;
+  align-items: center;
+  font-family: inherit;
+}
+
+.group-header:hover {
+  background: var(--color-bg-hover);
+}
+
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.group-content {
+  padding: 0 20px 12px;
+}
+
+.camera-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-md);
+  margin-bottom: 6px;
+  gap: 12px;
+}
+
+.camera-item:last-child {
+  margin-bottom: 0;
+}
+
+.camera-item .camera-info {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+}
+
+.camera-addr {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.protocol-badge {
+  background: var(--info-bg);
+  color: var(--info);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.port {
+  color: var(--accent-light);
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.path {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.camera-url small {
+  color: var(--text-muted);
+  font-size: 0.6875rem;
+  font-family: 'JetBrains Mono', monospace;
+  word-break: break-all;
+}
+
+/* Empty/Scanning States */
+.no-results {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--text-muted);
+  font-size: 0.9375rem;
+}
+
+.scanning-state {
+  text-align: center;
+  padding: 60px 20px;
+}
+
+.scanning-state .spinner {
+  margin: 0 auto 16px;
+}
+
+.scanning-state p {
+  color: var(--text-primary);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.scanning-state small {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+@media (max-width: 768px) {
+  .network-input-group {
+    flex-direction: column;
+  }
+
+  .network-input-group .btn {
+    width: 100%;
+  }
+
+  .results-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

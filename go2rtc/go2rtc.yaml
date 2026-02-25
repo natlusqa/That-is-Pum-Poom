@@ -4,15 +4,28 @@ log:
 api:
   listen: ":1984"
 
+# Low-latency RTSP server for worker process
 rtsp:
   listen: ":8554"
+  timeout: 5s
 
+# WebRTC for browser (UDP preferred for lower latency)
 webrtc:
   listen: ":8555"
+  candidates:
+    - udp
+    - tcp
 
+# MJPEG fallback for compatibility
 mjpeg:
   listen: ":8556"
 
-streams:
-  camera-11: "ffmpeg:rtsp://192.168.10.59:554/user=Qwerty123&password=Qwerty888&channel=20&stream=0.sdp?#video=mjpeg"
+# HLS for hybrid approach (fast delivery)
+hls:
+  listen: ":8857"
+  segment_duration: 1
+  part_duration: 200ms
 
+# Streams are configured dynamically via the go2rtc API
+# When cameras are added through the web UI, they are automatically registered here
+streams: {}

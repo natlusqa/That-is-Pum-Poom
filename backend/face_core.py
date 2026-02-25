@@ -2,6 +2,7 @@ import os
 import cv2
 import numpy as np
 import logging
+import time
 
 try:
     import onnxruntime
@@ -20,16 +21,22 @@ DET_SIZE = int(os.environ.get('DET_SIZE', '640'))
 
 
 def _get_providers():
-    """Auto-detect GPU (CUDA) availability, fallback to CPU"""
-    if onnxruntime and 'CUDAExecutionProvider' in onnxruntime.get_available_providers():
-        logger.info("CUDA detected — using GPU acceleration")
-        return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    """Auto-detect GPU availability: CUDA > DirectML > CPU"""
+    if onnxruntime:
+        available = onnxruntime.get_available_providers()
+        if 'CUDAExecutionProvider' in available:
+            logger.info("CUDA detected — using GPU acceleration")
+            return ['CUDAExecutionProvider', 'CPUExecutionProvider']
+        if 'DmlExecutionProvider' in available:
+            logger.info("DirectML detected — using GPU acceleration (RTX/AMD)")
+            return ['DmlExecutionProvider', 'CPUExecutionProvider']
     return ['CPUExecutionProvider']
 
 
 class FaceModel:
     def __init__(self):
         self.model = None
+        self._inference_times = []
 
     def load(self, verbose=True):
         """Initializes InsightFace model"""
@@ -111,7 +118,18 @@ class FaceModel:
         if img is None:
             return []
 
+        t0 = time.time()
         faces = self.model.get(img)
+        inference_ms = (time.time() - t0) * 1000
+
+        # Track inference time for performance monitoring
+        self._inference_times.append(inference_ms)
+        if len(self._inference_times) >= 100:
+            avg = sum(self._inference_times) / len(self._inference_times)
+            logger.info(f"Avg inference: {avg:.0f}ms over last 100 frames "
+                        f"(input: {img.shape[1]}x{img.shape[0]})")
+            self._inference_times.clear()
+
         if not faces:
             return []
 

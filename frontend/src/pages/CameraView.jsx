@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { FiArrowLeft, FiMaximize, FiRefreshCcw, FiCopy, FiSquare } from 'react-icons/fi';
+import { FiArrowLeft, FiMaximize, FiRefreshCcw, FiCopy, FiSquare, FiCamera, FiVolume2, FiVolumeX } from 'react-icons/fi';
 import { cameraAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import WebRTCPlayer from '../components/WebRTCPlayer';
@@ -22,7 +22,13 @@ const normalizeRtspPath = (path) => {
 };
 
 const buildCameraUrl = (camera) => {
-  if (!camera?.ip_address) return '';
+  if (!camera) return '';
+
+  if (camera.connection_type === 'dvr' && camera.dvr_url) {
+    return camera.dvr_url;
+  }
+
+  if (!camera.ip_address) return '';
   const protocol = camera.protocol || 'rtsp';
   const port = camera.port ? `:${camera.port}` : '';
   const path = protocol === 'rtsp'
@@ -39,9 +45,10 @@ const buildCameraUrl = (camera) => {
   return `${protocol}://${creds}${camera.ip_address}${port}${path}`;
 };
 
-const buildGo2rtcUrl = (cameraUrl) => {
+const buildGo2rtcUrl = (cameraUrl, format = 'mp4') => {
   if (!cameraUrl) return '';
-  return `/go2rtc/api/stream.mp4?src=${encodeURIComponent(cameraUrl)}`;
+  const endpoint = format === 'hls' ? 'stream.m3u8' : 'stream.mp4';
+  return `/go2rtc/api/${endpoint}?src=${encodeURIComponent(cameraUrl)}`;
 };
 
 function CameraView() {
@@ -49,9 +56,11 @@ function CameraView() {
   const [camera, setCamera] = useState(null);
   const [loading, setLoading] = useState(true);
   const [streamMode, setStreamMode] = useState('webrtc');
+  const [go2rtcFormat, setGo2rtcFormat] = useState('hls');
   const [streamError, setStreamError] = useState('');
   const [reloadKey, setReloadKey] = useState(0);
   const [overlayEnabled, setOverlayEnabled] = useState(false);
+  const [muted, setMuted] = useState(true);
   const videoRef = useRef(null);
   const { addToast } = useToast();
 
@@ -76,13 +85,44 @@ function CameraView() {
 
   const toggleFullscreen = () => {
     const container = document.querySelector('.video-container');
-    if (container && container.requestFullscreen) {
+    if (container?.requestFullscreen) {
       container.requestFullscreen();
     }
   };
 
+  const takeSnapshot = () => {
+    const video = videoRef.current;
+    if (!video) {
+      addToast('No video source available', 'error');
+      return;
+    }
+
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || video.clientWidth;
+      canvas.height = video.videoHeight || video.clientHeight;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `snapshot_${camera?.name || 'camera'}_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.jpg`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        addToast('Snapshot saved', 'success');
+      }, 'image/jpeg', 0.95);
+    } catch {
+      addToast('Failed to capture snapshot', 'error');
+    }
+  };
+
   const cameraUrl = useMemo(() => buildCameraUrl(camera), [camera]);
-  const go2rtcUrl = useMemo(() => buildGo2rtcUrl(cameraUrl), [cameraUrl]);
+  const go2rtcUrl = useMemo(() => buildGo2rtcUrl(cameraUrl, go2rtcFormat), [cameraUrl, go2rtcFormat]);
   const canDirect = camera?.protocol === 'http';
 
   const activeMode = useMemo(() => {
@@ -94,18 +134,18 @@ function CameraView() {
 
   const handleReload = () => {
     setStreamError('');
-    setReloadKey((value) => value + 1);
+    setReloadKey((v) => v + 1);
   };
 
   const handleStreamError = (msg) => {
     if (typeof msg === 'string') {
       setStreamError(msg);
     } else if (activeMode === 'direct') {
-      setStreamError('Не удалось подключиться напрямую к камере.');
+      setStreamError('Direct connection to camera failed.');
     } else if (activeMode === 'go2rtc') {
-      setStreamError('Не удалось загрузить поток через go2rtc.');
+      setStreamError('Failed to load stream via go2rtc.');
     } else {
-      setStreamError('Ошибка подключения к потоку.');
+      setStreamError('Stream connection error.');
     }
   };
 
@@ -117,18 +157,16 @@ function CameraView() {
     if (!value) return;
     try {
       await navigator.clipboard.writeText(value);
-      addToast(`Ссылка "${label}" скопирована`, 'success');
-    } catch (err) {
-      addToast('Не удалось скопировать ссылку', 'error');
+      addToast(`${label} URL copied`, 'success');
+    } catch {
+      addToast('Failed to copy', 'error');
     }
   };
 
   if (loading) {
     return (
       <div className="page-container">
-        <div className="loading">
-          <div className="spinner"></div>
-        </div>
+        <div className="loading"><div className="spinner"></div></div>
       </div>
     );
   }
@@ -137,63 +175,80 @@ function CameraView() {
     <div className="page-container">
       <div className="container">
         <div className="camera-view-header">
-          <Link to="/" className="btn btn-secondary">
-            <FiArrowLeft /> Назад
+          <Link to="/" className="btn btn-secondary btn-sm">
+            <FiArrowLeft /> Back
           </Link>
-          <h1>{camera?.name || 'Камера'}</h1>
-          <div className="header-actions">
-            <button onClick={toggleFullscreen} className="btn btn-primary">
-              <FiMaximize /> Полный экран
+          <h1>{camera?.name || 'Camera'}</h1>
+          <div className="btn-group">
+            <button onClick={takeSnapshot} className="btn btn-sm btn-secondary" title="Snapshot">
+              <FiCamera />
+            </button>
+            <button onClick={() => setMuted(!muted)} className="btn btn-sm btn-secondary" title={muted ? 'Unmute' : 'Mute'}>
+              {muted ? <FiVolumeX /> : <FiVolume2 />}
+            </button>
+            <button onClick={toggleFullscreen} className="btn btn-sm btn-primary" title="Fullscreen">
+              <FiMaximize />
             </button>
           </div>
         </div>
 
+        {/* Stream mode selector */}
         <div className="stream-toolbar">
           <div className="stream-actions">
             <button
-              type="button"
               className={`btn btn-sm ${activeMode === 'webrtc' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => setStreamMode('webrtc')}
             >
               WebRTC
             </button>
             <button
-              type="button"
               className={`btn btn-sm ${activeMode === 'go2rtc' ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => setStreamMode('go2rtc')}
             >
-              Go2RTC MP4
+              Go2RTC
             </button>
+            {activeMode === 'go2rtc' && (
+              <>
+                <span className="stream-divider"></span>
+                <button
+                  className={`btn btn-sm ${go2rtcFormat === 'hls' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setGo2rtcFormat('hls')}
+                >
+                  HLS
+                </button>
+                <button
+                  className={`btn btn-sm ${go2rtcFormat === 'mp4' ? 'btn-primary' : 'btn-secondary'}`}
+                  onClick={() => setGo2rtcFormat('mp4')}
+                >
+                  MP4
+                </button>
+              </>
+            )}
             {canDirect && (
               <button
-                type="button"
                 className={`btn btn-sm ${activeMode === 'direct' ? 'btn-primary' : 'btn-secondary'}`}
                 onClick={() => setStreamMode('direct')}
               >
-                Прямой HTTP
+                Direct HTTP
               </button>
             )}
-            <span className="stream-divider">|</span>
+            <span className="stream-divider"></span>
             <button
-              type="button"
               className={`btn btn-sm ${overlayEnabled ? 'btn-primary' : 'btn-secondary'}`}
               onClick={() => setOverlayEnabled(!overlayEnabled)}
-              title="Обводка детекций"
+              title="Face detection overlay"
             >
-              <FiSquare /> Детекция
+              <FiSquare /> Detection
             </button>
-            <button type="button" className="btn btn-sm btn-secondary" onClick={handleReload}>
-              <FiRefreshCcw /> Обновить
+            <button className="btn btn-sm btn-secondary" onClick={handleReload}>
+              <FiRefreshCcw />
             </button>
           </div>
 
-          {streamError && (
-            <div className="alert alert-error">
-              {streamError}
-            </div>
-          )}
+          {streamError && <div className="alert alert-error">{streamError}</div>}
         </div>
 
+        {/* Video */}
         <div className="video-container" style={{ position: 'relative' }}>
           {activeMode === 'webrtc' ? (
             <WebRTCPlayer
@@ -210,7 +265,7 @@ function CameraView() {
               src={go2rtcUrl}
               className="video-stream"
               autoPlay
-              muted
+              muted={muted}
               controls
               playsInline
               onError={handleStreamError}
@@ -227,11 +282,10 @@ function CameraView() {
             />
           ) : (
             <div className="video-placeholder">
-              Ссылка на поток не задана. Проверьте настройки камеры.
+              Stream URL not configured. Check camera settings.
             </div>
           )}
 
-          {/* Bounding Box Overlay */}
           {camera?.face_recognition_enabled && (
             <BoundingBoxOverlay
               cameraId={id}
@@ -241,47 +295,26 @@ function CameraView() {
           )}
         </div>
 
+        {/* Stream info */}
         <div className="stream-info">
           <div className="stream-info-row">
-            <span className="stream-label">
-              Ссылка камеры ({camera?.protocol?.toUpperCase() || 'RTSP'}):
-            </span>
-            <code className="stream-url">{cameraUrl || '—'}</code>
+            <span className="stream-label">Camera URL:</span>
+            <code className="stream-url">{cameraUrl || '-'}</code>
             <button
-              type="button"
               className="btn btn-sm btn-secondary"
-              onClick={() => handleCopy(cameraUrl, 'камера')}
+              onClick={() => handleCopy(cameraUrl, 'Camera')}
               disabled={!cameraUrl}
             >
-              <FiCopy /> Копировать
-            </button>
-          </div>
-
-          <div className="stream-info-row">
-            <span className="stream-label">Go2RTC MP4 URL:</span>
-            <code className="stream-url">{go2rtcUrl || '—'}</code>
-            <button
-              type="button"
-              className="btn btn-sm btn-secondary"
-              onClick={() => handleCopy(go2rtcUrl, 'Go2RTC')}
-              disabled={!go2rtcUrl}
-            >
-              <FiCopy /> Копировать
+              <FiCopy />
             </button>
           </div>
 
           {camera?.protocol === 'rtsp' && (
             <div className="stream-hint">
-              WebRTC — минимальная задержка. Go2RTC MP4 — совместимость с любым браузером.
+              WebRTC provides the lowest latency (~100ms). HLS has ~1s delay. MP4 offers best compatibility.
             </div>
           )}
         </div>
-
-        {camera?.face_recognition_enabled && (
-          <div className="alert alert-info mt-3">
-            На этой камере включено распознавание лиц. Нажмите кнопку "Детекция" для отображения обводок.
-          </div>
-        )}
       </div>
     </div>
   );

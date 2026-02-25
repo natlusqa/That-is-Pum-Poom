@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 import numpy as np
 import jwt
-from flask import Flask, request, jsonify, send_from_directory, Response, redirect
+from flask import Flask, request, jsonify, send_from_directory, send_file, Response, redirect
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -21,6 +21,7 @@ from dateutil import parser as date_parser
 from collections import defaultdict, deque
 
 from face_core import face_engine
+from camera_discovery import CameraDiscovery
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -58,9 +59,13 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
 }
 app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'instance', 'face_encodings')
+app.config['RECORDINGS_FOLDER'] = os.path.join(BASE_DIR, 'instance', 'recordings')
+app.config['SNAPSHOTS_FOLDER'] = os.path.join(BASE_DIR, 'instance', 'snapshots')
 
 db = SQLAlchemy(app)
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['RECORDINGS_FOLDER'], exist_ok=True)
+os.makedirs(app.config['SNAPSHOTS_FOLDER'], exist_ok=True)
 
 # --- DATABASE MODELS ---
 
@@ -120,7 +125,10 @@ class Camera(db.Model):
     def is_online(self):
         if not self.last_heartbeat:
             return False
-        return (utc_now() - self.last_heartbeat).total_seconds() < 120
+        hb = self.last_heartbeat
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=timezone.utc)
+        return (utc_now() - hb).total_seconds() < 120
 
     def to_dict(self, include_credentials=False):
         data = {
@@ -188,6 +196,23 @@ class AuditLog(db.Model):
     ip_address = db.Column(db.String(45))
     timestamp = db.Column(db.DateTime, default=utc_now, index=True)
     source = db.Column(db.String(20), default='web')  # 'web', 'telegram', 'api'
+
+
+class Recording(db.Model):
+    __tablename__ = 'recordings'
+    id = db.Column(db.Integer, primary_key=True)
+    camera_id = db.Column(db.Integer, db.ForeignKey('camera.id'), nullable=False)
+    employee_id = db.Column(db.Integer, db.ForeignKey('employee.id'), nullable=True)
+    event_type = db.Column(db.String(50), default='face')  # face, motion, manual
+    start_time = db.Column(db.DateTime, nullable=False)
+    end_time = db.Column(db.DateTime, nullable=True)
+    file_path = db.Column(db.String(500), nullable=True)
+    thumbnail_path = db.Column(db.String(500), nullable=True)
+    file_size = db.Column(db.Integer, default=0)
+    created_at = db.Column(db.DateTime, default=utc_now)
+
+    camera = db.relationship('Camera', backref='recordings')
+    employee = db.relationship('Employee', backref='recordings')
 
 
 def log_audit(action, resource_type=None, resource_id=None, details=None,
@@ -889,6 +914,92 @@ def camera_heartbeat(camera_id):
     return jsonify({'status': 'ok'})
 
 
+
+# --- CAMERA DISCOVERY ---
+
+discovery_state = {'scanning': False, 'results': [], 'network': '192.168.1.0/24'}
+
+
+@app.route('/api/camera-discovery/scan', methods=['POST'])
+@token_required
+@role_required('admin', 'super_admin')
+def start_camera_discovery(current_user):
+    """Start automatic camera discovery scan in network."""
+    if discovery_state['scanning']:
+        return jsonify({'error': 'Scan already in progress'}), 400
+
+    data = request.get_json() or {}
+    network = data.get('network', '192.168.1.0/24')
+
+    discovery_state['scanning'] = True
+    discovery_state['network'] = network
+    discovery_state['results'] = []
+
+    def scan_in_background():
+        try:
+            scanner = CameraDiscovery(network=network, timeout=3)
+            results = scanner.scan(max_workers=15)
+            discovery_state['results'] = results
+            logger.info(f"Camera discovery complete: {len(results)} endpoints found")
+        except Exception as e:
+            logger.error(f"Camera discovery failed: {e}")
+            discovery_state['results'] = []
+        finally:
+            discovery_state['scanning'] = False
+
+    # Run scan in background thread
+    import threading
+    thread = threading.Thread(target=scan_in_background, daemon=True)
+    thread.start()
+
+    return jsonify({
+        'message': 'Discovery scan started',
+        'network': network
+    }), 202
+
+
+@app.route('/api/camera-discovery/status', methods=['GET'])
+@token_required
+def get_discovery_status(current_user):
+    """Get discovery status and results."""
+    return jsonify({
+        'scanning': discovery_state['scanning'],
+        'network': discovery_state['network'],
+        'found_count': len(discovery_state['results']),
+        'results': discovery_state['results'][:50]  # Limit to first 50 results
+    })
+
+
+@app.route('/api/camera-discovery/add', methods=['POST'])
+@token_required
+@role_required('admin', 'super_admin')
+def add_discovered_camera(current_user):
+    """Add a discovered camera to the system."""
+    data = request.get_json()
+
+    camera = Camera(
+        name=data.get('name', f"Камера {data.get('ip_address')}"),
+        connection_type='direct',
+        location=data.get('location', ''),
+        ip_address=data.get('ip_address'),
+        port=data.get('port', 554),
+        username=data.get('username', 'admin'),
+        password=data.get('password', ''),
+        protocol=data.get('protocol', 'rtsp'),
+        path=data.get('path', '/stream'),
+        active=True,
+        face_recognition_enabled=False
+    )
+
+    db.session.add(camera)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Camera added successfully',
+        'id': camera.id,
+        'name': camera.name
+    }), 201
+
 # --- ATTENDANCE LOGS ---
 
 @app.route('/api/attendance', methods=['GET'])
@@ -1083,6 +1194,170 @@ def get_attendance_stats(current_user):
     })
 
 
+# --- RECORDINGS ---
+
+@app.route('/api/recordings', methods=['GET'])
+@token_required
+def get_recordings(current_user):
+    """List recordings with optional filters (camera_id, date_from, date_to, event_type)"""
+    query = Recording.query
+
+    camera_id = request.args.get('camera_id', type=int)
+    event_type = request.args.get('event_type', type=str)
+    date_from = request.args.get('date_from', type=str)
+    date_to = request.args.get('date_to', type=str)
+
+    if camera_id:
+        query = query.filter_by(camera_id=camera_id)
+    if event_type:
+        query = query.filter_by(event_type=event_type)
+    if date_from:
+        try:
+            dt_from = date_parser.parse(date_from)
+            query = query.filter(Recording.start_time >= dt_from)
+        except Exception as e:
+            logger.warning(f"Invalid date_from: {date_from}: {e}")
+    if date_to:
+        try:
+            dt_to = date_parser.parse(date_to)
+            dt_to = dt_to.replace(hour=23, minute=59, second=59)
+            query = query.filter(Recording.start_time <= dt_to)
+        except Exception as e:
+            logger.warning(f"Invalid date_to: {date_to}: {e}")
+
+    page = request.args.get('page', type=int, default=1)
+    per_page = request.args.get('per_page', type=int, default=50)
+    per_page = min(per_page, 200)
+
+    pagination = query.order_by(Recording.start_time.desc()).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+
+    return jsonify({
+        'items': [{
+            'id': rec.id,
+            'camera_id': rec.camera_id,
+            'camera_name': rec.camera.name if rec.camera else 'Unknown',
+            'employee_id': rec.employee_id,
+            'employee_name': rec.employee.name if rec.employee else None,
+            'event_type': rec.event_type,
+            'start_time': rec.start_time.isoformat() if rec.start_time else None,
+            'end_time': rec.end_time.isoformat() if rec.end_time else None,
+            'file_path': rec.file_path,
+            'thumbnail_path': rec.thumbnail_path,
+            'file_size': rec.file_size,
+            'created_at': rec.created_at.isoformat() if rec.created_at else None,
+        } for rec in pagination.items],
+        'total': pagination.total,
+        'pages': pagination.pages,
+        'page': pagination.page,
+        'per_page': per_page
+    })
+
+
+@app.route('/api/recordings/<int:recording_id>/stream', methods=['GET'])
+@token_required
+def stream_recording(current_user, recording_id):
+    """Stream the recording MP4 file"""
+    recording = Recording.query.get_or_404(recording_id)
+
+    if not recording.file_path:
+        return jsonify({'error': 'Recording file not available'}), 404
+
+    full_path = os.path.join(app.config['RECORDINGS_FOLDER'], recording.file_path)
+    if not os.path.exists(full_path):
+        return jsonify({'error': 'Recording file not found on disk'}), 404
+
+    return send_file(full_path, mimetype='video/mp4', as_attachment=False)
+
+
+@app.route('/api/recordings/<int:recording_id>/thumbnail', methods=['GET'])
+@token_required
+def get_recording_thumbnail(current_user, recording_id):
+    """Return the thumbnail image for a recording"""
+    recording = Recording.query.get_or_404(recording_id)
+
+    if not recording.thumbnail_path:
+        return jsonify({'error': 'Thumbnail not available'}), 404
+
+    full_path = os.path.join(app.config['RECORDINGS_FOLDER'], recording.thumbnail_path)
+    if not os.path.exists(full_path):
+        return jsonify({'error': 'Thumbnail file not found on disk'}), 404
+
+    return send_file(full_path, mimetype='image/jpeg')
+
+
+@app.route('/api/recordings/<int:recording_id>', methods=['DELETE'])
+@token_required
+@role_required('admin', 'super_admin')
+def delete_recording(current_user, recording_id):
+    """Delete a recording (admin only). Removes the file from disk too."""
+    recording = Recording.query.get_or_404(recording_id)
+
+    # Delete recording file from disk
+    if recording.file_path:
+        file_full_path = os.path.join(app.config['RECORDINGS_FOLDER'], recording.file_path)
+        if os.path.exists(file_full_path):
+            try:
+                os.remove(file_full_path)
+            except Exception as e:
+                logger.error(f"Failed to delete recording file {file_full_path}: {e}")
+
+    # Delete thumbnail from disk
+    if recording.thumbnail_path:
+        thumb_full_path = os.path.join(app.config['RECORDINGS_FOLDER'], recording.thumbnail_path)
+        if os.path.exists(thumb_full_path):
+            try:
+                os.remove(thumb_full_path)
+            except Exception as e:
+                logger.error(f"Failed to delete thumbnail file {thumb_full_path}: {e}")
+
+    log_audit('delete_recording', 'recording', recording_id,
+              f'Recording deleted by {current_user.username}',
+              user_id=current_user.id, username=current_user.username)
+
+    db.session.delete(recording)
+    db.session.commit()
+    return jsonify({'message': 'Recording deleted'})
+
+
+@app.route('/api/recordings/timeline', methods=['GET'])
+@token_required
+def get_recordings_timeline(current_user):
+    """Return timeline data for a given date range and camera"""
+    camera_id = request.args.get('camera_id', type=int)
+    date_from = request.args.get('date_from', type=str)
+    date_to = request.args.get('date_to', type=str)
+
+    query = Recording.query
+
+    if camera_id:
+        query = query.filter_by(camera_id=camera_id)
+    if date_from:
+        try:
+            dt_from = date_parser.parse(date_from)
+            query = query.filter(Recording.start_time >= dt_from)
+        except Exception as e:
+            logger.warning(f"Invalid date_from in timeline: {date_from}: {e}")
+    if date_to:
+        try:
+            dt_to = date_parser.parse(date_to)
+            dt_to = dt_to.replace(hour=23, minute=59, second=59)
+            query = query.filter(Recording.start_time <= dt_to)
+        except Exception as e:
+            logger.warning(f"Invalid date_to in timeline: {date_to}: {e}")
+
+    recordings = query.order_by(Recording.start_time.asc()).limit(1000).all()
+
+    return jsonify([{
+        'id': rec.id,
+        'start_time': rec.start_time.isoformat() if rec.start_time else None,
+        'end_time': rec.end_time.isoformat() if rec.end_time else None,
+        'event_type': rec.event_type,
+        'camera_id': rec.camera_id,
+    } for rec in recordings])
+
+
 # --- CAMERA SNAPSHOT ---
 
 @app.route('/api/cameras/<int:camera_id>/snapshot', methods=['GET'])
@@ -1117,6 +1392,58 @@ def get_camera_snapshot(current_user, camera_id):
     except Exception as e:
         logger.error(f"Snapshot error for camera {camera_id}: {e}")
         return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500
+
+
+@app.route('/api/cameras/<int:camera_id>/snapshot', methods=['POST'])
+@token_required
+def save_camera_snapshot(current_user, camera_id):
+    """Capture a snapshot from the camera and save as JPEG in instance/snapshots/"""
+    import cv2
+    camera = Camera.query.get_or_404(camera_id)
+    if not camera.active:
+        return jsonify({'error': 'Camera is inactive'}), 404
+
+    stream_url = camera.get_stream_url()
+    if not stream_url:
+        return jsonify({'error': 'Camera stream URL is not configured'}), 400
+
+    try:
+        cap = cv2.VideoCapture(stream_url)
+        if not cap.isOpened():
+            return jsonify({'error': 'Cannot connect to camera'}), 503
+
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            return jsonify({'error': 'Failed to capture frame'}), 503
+
+        timestamp_str = utc_now().strftime('%Y%m%d_%H%M%S')
+        filename = f"camera_{camera_id}_{timestamp_str}.jpg"
+        file_path = os.path.join(app.config['SNAPSHOTS_FOLDER'], filename)
+
+        cv2.imwrite(file_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        log_audit('snapshot_saved', 'camera', camera_id,
+                  f'Snapshot saved by {current_user.username}: {filename}',
+                  user_id=current_user.id, username=current_user.username)
+
+        return jsonify({
+            'message': 'Snapshot saved',
+            'file_path': filename,
+            'url': f'/api/snapshots/{filename}'
+        }), 201
+    except Exception as e:
+        logger.error(f"Snapshot save error for camera {camera_id}: {e}")
+        return jsonify({'error': f'Snapshot failed: {str(e)}'}), 500
+
+
+@app.route('/api/snapshots/<path:filename>', methods=['GET'])
+@token_required
+def get_saved_snapshot(current_user, filename):
+    """Serve a saved snapshot image"""
+    safe_name = os.path.basename(filename)
+    return send_from_directory(app.config['SNAPSHOTS_FOLDER'], safe_name)
 
 
 # --- INTERNAL SNAPSHOT (no auth, for telegram bot on same network) ---
@@ -1333,6 +1660,155 @@ def internal_search_camera():
         'location': c.location,
         'is_online': c.is_online()
     } for c in cameras])
+
+
+# --- INTERNAL ENDPOINTS FOR WORKER ---
+
+@app.route('/api/internal/worker/cameras', methods=['GET'])
+def internal_worker_cameras():
+    """Get active cameras with stream URLs for the worker process"""
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cameras = Camera.query.filter_by(active=True, face_recognition_enabled=True).all()
+    return jsonify([{
+        'id': c.id,
+        'name': c.name,
+        'stream_url': c.get_stream_url(),
+    } for c in cameras])
+
+
+@app.route('/api/internal/worker/faces', methods=['GET'])
+def internal_worker_faces():
+    """Get all known face embeddings for the worker"""
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    employees = Employee.query.filter_by(active=True).all()
+    faces = []
+    for emp in employees:
+        if emp.face_encoding:
+            faces.append({
+                'id': emp.id,
+                'name': emp.name,
+                'encoding': emp.face_encoding,  # JSON string of 512-dim vector
+            })
+    return jsonify(faces)
+
+
+@app.route('/api/internal/worker/attendance', methods=['POST'])
+def internal_worker_attendance():
+    """Log attendance from worker process"""
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'No data'}), 400
+
+    # Support batch logging
+    entries = data if isinstance(data, list) else [data]
+    logged = 0
+    for entry in entries:
+        try:
+            log = AttendanceLog(
+                employee_id=entry['employee_id'],
+                camera_id=entry['camera_id'],
+                timestamp=datetime.fromisoformat(entry['timestamp']) if entry.get('timestamp') else utc_now(),
+                confidence=entry.get('confidence'),
+                event_type=entry.get('event_type', 'check-in')
+            )
+            db.session.add(log)
+            logged += 1
+        except Exception as e:
+            logger.error(f"Failed to log attendance entry: {e}")
+
+    db.session.commit()
+    return jsonify({'logged': logged})
+
+
+@app.route('/api/internal/worker/recording', methods=['POST'])
+def internal_worker_recording():
+    """Internal endpoint for the worker to report a recording event.
+    Worker sends camera_id, employee_id (optional), event_type, and the recording file.
+    """
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    camera_id = request.form.get('camera_id', type=int)
+    employee_id = request.form.get('employee_id', type=int)
+    event_type = request.form.get('event_type', 'face')
+    start_time_str = request.form.get('start_time')
+    end_time_str = request.form.get('end_time')
+
+    if not camera_id:
+        return jsonify({'error': 'camera_id is required'}), 400
+    if not start_time_str:
+        return jsonify({'error': 'start_time is required'}), 400
+
+    try:
+        start_time = date_parser.parse(start_time_str)
+    except Exception as e:
+        return jsonify({'error': f'Invalid start_time: {e}'}), 400
+
+    end_time = None
+    if end_time_str:
+        try:
+            end_time = date_parser.parse(end_time_str)
+        except Exception as e:
+            logger.warning(f"Invalid end_time: {end_time_str}: {e}")
+
+    file_path = None
+    file_size = 0
+    thumbnail_path = None
+
+    # Handle recording file upload
+    if 'file' in request.files:
+        recording_file = request.files['file']
+        timestamp_str = start_time.strftime('%Y%m%d_%H%M%S')
+        filename = f"cam{camera_id}_{event_type}_{timestamp_str}.mp4"
+        full_path = os.path.join(app.config['RECORDINGS_FOLDER'], filename)
+        recording_file.save(full_path)
+        file_path = filename
+        file_size = os.path.getsize(full_path)
+
+    # Handle thumbnail upload
+    if 'thumbnail' in request.files:
+        thumb_file = request.files['thumbnail']
+        timestamp_str = start_time.strftime('%Y%m%d_%H%M%S')
+        thumb_filename = f"cam{camera_id}_{event_type}_{timestamp_str}_thumb.jpg"
+        thumb_full_path = os.path.join(app.config['RECORDINGS_FOLDER'], thumb_filename)
+        thumb_file.save(thumb_full_path)
+        thumbnail_path = thumb_filename
+
+    recording = Recording(
+        camera_id=camera_id,
+        employee_id=employee_id if employee_id else None,
+        event_type=event_type,
+        start_time=start_time,
+        end_time=end_time,
+        file_path=file_path,
+        thumbnail_path=thumbnail_path,
+        file_size=file_size,
+    )
+    db.session.add(recording)
+    db.session.commit()
+
+    logger.info(f"Recording logged: camera={camera_id}, type={event_type}, id={recording.id}")
+
+    return jsonify({
+        'message': 'Recording logged',
+        'id': recording.id,
+        'file_path': file_path
+    }), 201
 
 
 # --- AUDIT LOG API ---

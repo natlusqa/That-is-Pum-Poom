@@ -8,6 +8,7 @@ import { ToastProvider } from './components/ToastProvider';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Cameras from './pages/Cameras';
+import CameraDiscovery from './pages/CameraDiscovery';
 import Employees from './pages/Employees';
 import CameraView from './pages/CameraView';
 import Attendance from './pages/Attendance';
@@ -58,6 +59,14 @@ function App() {
             element={
               <ProtectedRoute roles={['admin', 'super_admin']}>
                 <Cameras />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="camera-discovery"
+            element={
+              <ProtectedRoute roles={['admin', 'super_admin']}>
+                <CameraDiscovery />
               </ProtectedRoute>
             }
           />

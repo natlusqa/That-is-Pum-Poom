@@ -1,422 +1,543 @@
+"""
+Optimized Camera Worker — Threaded architecture with shared model.
+
+Key optimizations vs original:
+1. Threading (not multiprocessing) — all cameras share one model instance (~300MB RAM once)
+2. Threaded frame grabber — always grabs latest frame, no RTSP buffer lag
+3. Frame resize before inference — 2304x1296 → 960xN saves ~5x compute
+4. Non-blocking detection publishing — fire-and-forget HTTP posts
+5. Batch attendance logging — groups API calls every 2 seconds
+6. API-based data — works with PostgreSQL backend (not SQLite)
+"""
+
 import os
 import cv2
 import numpy as np
-import sqlite3
 import json
 import time
 import requests
-from datetime import datetime, timezone, timedelta
-from multiprocessing import Process, Queue, Event
+import threading
 import logging
 import signal
+import sys
+from datetime import datetime, timezone, timedelta
+from queue import Queue, Empty
 from face_core import face_engine
 from face_matching import build_face_matrix, match_face
 
-# --- LOGGING SETUP ---
+# --- LOGGING ---
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
+    level=os.environ.get('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s [%(levelname)s] [%(name)s] %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('worker')
 
 # --- CONFIG ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "instance", "surveillance.db")
-
+API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:5002')
+INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
 THRESHOLD = float(os.environ.get('FACE_THRESHOLD', '0.5'))
 COOLDOWN = int(os.environ.get('FACE_COOLDOWN', '60'))
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '10'))
-FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '2'))
-HEADLESS = os.environ.get('HEADLESS', 'False').lower() == 'true'
-API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:5002')
-HEARTBEAT_INTERVAL = 30  # seconds
+FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '3'))
+PROCESS_WIDTH = int(os.environ.get('PROCESS_WIDTH', '960'))  # resize before inference
+HEARTBEAT_INTERVAL = 30
+FACE_RELOAD_INTERVAL = int(os.environ.get('FACE_RELOAD_INTERVAL', '30'))
 
-# --- TIMEZONE CONFIGURATION ---
+# Timezone
 ASTANA_TZ = timezone(timedelta(hours=5))
 
 
 def get_astana_time():
-    """Returns current time in Astana (UTC+5)"""
     return datetime.now(ASTANA_TZ)
 
 
-class CameraWorkerProcess(Process):
+def api_headers():
+    return {'X-Internal-Key': INTERNAL_API_KEY}
+
+
+# --- THREADED FRAME GRABBER ---
+
+class FrameGrabber:
     """
-    Process for handling a single camera.
-    Gets camera config + all known employees in memory.
+    Continuously reads frames in a background thread.
+    Always returns the latest frame — no buffering delay.
     """
 
-    def __init__(self, camera_id, camera_url, known_face_matrix, known_ids, known_names,
-                 log_queue, detection_queue, shutdown_event):
-        super().__init__()
+    def __init__(self, url, camera_name=''):
+        self.url = url
+        self.camera_name = camera_name
+        self.frame = None
+        self.ret = False
+        self.stopped = False
+        self.lock = threading.Lock()
+        self.cap = None
+        self.fps = 0
+        self._frame_count = 0
+        self._fps_time = time.time()
+
+    def start(self):
+        self.cap = self._create_capture()
+        if self.cap is None or not self.cap.isOpened():
+            logger.error(f"[{self.camera_name}] Failed to open stream: {str(self.url)[:60]}")
+            return None
+        # Read first frame
+        self.ret, self.frame = self.cap.read()
+        t = threading.Thread(target=self._update, daemon=True, name=f"grab-{self.camera_name}")
+        t.start()
+        logger.info(f"[{self.camera_name}] Frame grabber started")
+        return self
+
+    def _create_capture(self):
+        """Create optimized VideoCapture"""
+        cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+        if cap.isOpened():
+            # Minimize buffer — always get latest frame
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # Use TCP for reliable RTSP (less frame corruption)
+            cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+            cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000)
+        return cap
+
+    def _update(self):
+        """Continuously grab frames in background"""
+        consecutive_fails = 0
+        while not self.stopped:
+            if self.cap is None or not self.cap.isOpened():
+                logger.warning(f"[{self.camera_name}] Stream lost, reconnecting...")
+                time.sleep(2)
+                self.cap = self._create_capture()
+                if self.cap is None or not self.cap.isOpened():
+                    consecutive_fails += 1
+                    if consecutive_fails > 10:
+                        logger.error(f"[{self.camera_name}] Too many reconnect failures, stopping")
+                        self.stopped = True
+                        break
+                    continue
+                consecutive_fails = 0
+
+            ret, frame = self.cap.read()
+            if not ret:
+                consecutive_fails += 1
+                if consecutive_fails > 30:
+                    # Force reconnect
+                    logger.warning(f"[{self.camera_name}] {consecutive_fails} consecutive failures, forcing reconnect")
+                    self.cap.release()
+                    self.cap = None
+                    consecutive_fails = 0
+                continue
+
+            consecutive_fails = 0
+            with self.lock:
+                self.ret = True
+                self.frame = frame
+            self._frame_count += 1
+
+            # Calculate FPS every 5 seconds
+            now = time.time()
+            if now - self._fps_time >= 5.0:
+                self.fps = self._frame_count / (now - self._fps_time)
+                self._frame_count = 0
+                self._fps_time = now
+
+    def read(self):
+        """Get latest frame (non-blocking)"""
+        with self.lock:
+            return self.ret, self.frame.copy() if self.frame is not None else None
+
+    def stop(self):
+        self.stopped = True
+        if self.cap:
+            self.cap.release()
+
+
+# --- CAMERA WORKER THREAD ---
+
+class CameraWorker(threading.Thread):
+    """
+    Per-camera worker thread. Uses shared face_engine (no model duplication).
+    """
+
+    def __init__(self, camera_id, camera_url, camera_name,
+                 face_data, log_queue, shutdown_event):
+        super().__init__(daemon=True, name=f"cam-{camera_id}")
         self.camera_id = camera_id
         self.camera_url = camera_url
-        self.known_face_matrix = known_face_matrix
-        self.known_ids = known_ids
-        self.known_names = known_names
+        self.camera_name = camera_name
+        self.face_data = face_data  # shared dict with lock
         self.log_queue = log_queue
-        self.detection_queue = detection_queue
         self.shutdown_event = shutdown_event
-
         self.last_seen = {}
         self.frame_count = 0
-        self.face_engine = None
         self.last_heartbeat = 0
-        self.logger = logging.getLogger(f"Camera-{camera_id}")
+        self.log = logging.getLogger(f"cam-{camera_id}")
 
     def run(self):
-        """Main video processing loop"""
+        self.log.info(f"Starting worker for '{self.camera_name}' ({str(self.camera_url)[:50]}...)")
+
+        grabber = FrameGrabber(self.camera_url, self.camera_name)
+        if grabber.start() is None:
+            self.log.error(f"Cannot connect to camera '{self.camera_name}', worker exiting")
+            return
+
         try:
-            self.logger.info(f"Starting camera worker (URL: {str(self.camera_url)[:50]}...)")
-            self.face_engine = face_engine.__class__()
-            self.face_engine.load()
-
-            cap = self._connect_camera()
-            if cap is None:
-                self.logger.error(f"Failed to connect to camera {self.camera_id}")
-                return
-
             while not self.shutdown_event.is_set():
-                ret, frame = cap.read()
-
-                if not ret:
-                    self.logger.warning("Frame read failed, reconnecting...")
-                    cap.release()
-                    time.sleep(2)
-                    cap = self._connect_camera()
-                    if cap is None:
-                        break
+                ret, frame = grabber.read()
+                if not ret or frame is None:
+                    time.sleep(0.1)
                     continue
 
                 self.frame_count += 1
-
                 if self.frame_count % FRAME_SKIP != 0:
+                    time.sleep(0.01)  # yield CPU
                     continue
 
                 self._process_frame(frame)
                 self._send_heartbeat()
 
-            cap.release()
-            self.logger.info(f"Camera {self.camera_id} worker stopped")
-
         except Exception as e:
-            self.logger.error(f"Worker exception: {e}", exc_info=True)
+            self.log.error(f"Worker exception: {e}", exc_info=True)
         finally:
-            if 'cap' in locals() and cap is not None:
-                cap.release()
-
-    def _connect_camera(self, retries=3):
-        """Connect to camera with retry logic"""
-        for attempt in range(retries):
-            try:
-                cap = cv2.VideoCapture(self.camera_url)
-                if cap.isOpened():
-                    self.logger.info(f"Connected to camera {self.camera_id}")
-                    return cap
-            except Exception as e:
-                self.logger.debug(f"Attempt {attempt + 1} failed: {e}")
-            time.sleep(2)
-        return None
-
-    def _send_heartbeat(self):
-        """Periodically update camera heartbeat via API"""
-        now = time.time()
-        if now - self.last_heartbeat < HEARTBEAT_INTERVAL:
-            return
-        self.last_heartbeat = now
-        try:
-            requests.post(
-                f"{API_BASE_URL}/api/cameras/{self.camera_id}/heartbeat",
-                timeout=5
-            )
-        except Exception:
-            pass  # Non-critical
+            grabber.stop()
+            self.log.info(f"Worker stopped for '{self.camera_name}'")
 
     def _process_frame(self, frame):
-        """Process one frame: detection + recognition"""
+        """Resize frame, detect faces, match against known faces"""
         try:
-            all_faces = self.face_engine.get_all_faces(frame)
+            # Resize for faster inference
+            h, w = frame.shape[:2]
+            if w > PROCESS_WIDTH:
+                scale = PROCESS_WIDTH / w
+                frame_small = cv2.resize(frame, None, fx=scale, fy=scale,
+                                         interpolation=cv2.INTER_LINEAR)
+            else:
+                frame_small = frame
+                scale = 1.0
+
+            all_faces = face_engine.get_all_faces(frame_small)
             if not all_faces:
                 return
 
             detection_data = []
+            face_data = self.face_data  # thread-safe read
 
-            # Process top 5 faces
             for face_info in all_faces[:5]:
-                match_result = self._recognize_face(face_info)
+                match_result = self._recognize_face(face_info, face_data)
+
+                # Scale bbox back to original coordinates
+                bbox = face_info['bbox']
+                if scale != 1.0:
+                    bbox = [int(b / scale) for b in bbox]
+
                 detection_data.append({
-                    'bbox': face_info['bbox'],
+                    'bbox': bbox,
                     'name': match_result[0] if match_result else 'Unknown',
                     'confidence': match_result[1] if match_result else 0.0,
                     'det_score': face_info['det_score'],
                 })
 
-            # Publish detection events for bounding box overlay
-            if detection_data and self.detection_queue is not None:
-                try:
-                    event_data = {
-                        'camera_id': self.camera_id,
-                        'faces': detection_data,
-                        'frame_width': frame.shape[1],
-                        'frame_height': frame.shape[0],
-                        'timestamp': time.time()
-                    }
-                    self.detection_queue.put_nowait(event_data)
-
-                    # Also send to Flask server for WebSocket broadcast
-                    try:
-                        requests.post(
-                            f'{API_BASE_URL}/api/detections/publish',
-                            json=event_data,
-                            timeout=1
-                        )
-                    except Exception:
-                        pass  # Non-critical, just skip if server is unavailable
-                except Exception:
-                    pass  # Queue full, skip
+            # Publish detection events (non-blocking)
+            if detection_data:
+                self._publish_detections(detection_data, w, h)
 
         except Exception as e:
-            self.logger.error(f"Frame processing error: {e}")
+            self.log.error(f"Frame processing error: {e}")
 
-    def _recognize_face(self, face_info):
-        """Recognize a single face using vectorized matching"""
+    def _recognize_face(self, face_info, face_data):
+        """Match face against known database"""
         v_cam = face_info['embedding']
+        matrix = face_data.get('matrix')
+        ids = face_data.get('ids', [])
+        names = face_data.get('names', [])
 
-        emp_id, name, sim = match_face(
-            v_cam, self.known_face_matrix, self.known_ids, self.known_names,
-            threshold=THRESHOLD
-        )
+        if matrix is None or matrix.shape[0] == 0:
+            return None
+
+        emp_id, name, sim = match_face(v_cam, matrix, ids, names, threshold=THRESHOLD)
 
         if emp_id is not None:
             now = get_astana_time()
-
             if emp_id not in self.last_seen or \
                (now - self.last_seen[emp_id]).total_seconds() >= COOLDOWN:
 
                 log_entry = {
                     'employee_id': emp_id,
                     'camera_id': self.camera_id,
-                    'timestamp': now.strftime('%Y-%m-%d %H:%M:%S'),
+                    'timestamp': now.isoformat(),
                     'confidence': float(sim),
                     'event_type': 'check-in'
                 }
-
                 self.log_queue.put(log_entry)
                 self.last_seen[emp_id] = now
-                self.logger.info(f"{name} detected (conf: {sim:.3f}) - Logged at {log_entry['timestamp']}")
+                self.log.info(f"{name} detected (conf: {sim:.3f})")
 
             return name, float(sim)
-
         return None
 
+    def _publish_detections(self, detection_data, frame_w, frame_h):
+        """Send detection events to backend for WebSocket broadcast (non-blocking)"""
+        def _send():
+            try:
+                requests.post(
+                    f'{API_BASE_URL}/api/detections/publish',
+                    json={
+                        'camera_id': self.camera_id,
+                        'faces': detection_data,
+                        'frame_width': frame_w,
+                        'frame_height': frame_h,
+                        'timestamp': time.time()
+                    },
+                    headers=api_headers(),
+                    timeout=2
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_send, daemon=True).start()
 
-class AttendanceLogger(Process):
-    """
-    Dedicated process for writing attendance logs to the database.
-    Prevents "database is locked" errors from concurrent writes.
-    Uses a persistent connection and batch inserts.
-    """
+    def _send_heartbeat(self):
+        now = time.time()
+        if now - self.last_heartbeat < HEARTBEAT_INTERVAL:
+            return
+        self.last_heartbeat = now
+
+        def _beat():
+            try:
+                requests.post(
+                    f"{API_BASE_URL}/api/cameras/{self.camera_id}/heartbeat",
+                    headers=api_headers(),
+                    timeout=5
+                )
+            except Exception:
+                pass
+        threading.Thread(target=_beat, daemon=True).start()
+
+
+# --- ATTENDANCE LOGGER THREAD ---
+
+class AttendanceLogger(threading.Thread):
+    """Batches attendance logs and sends to API every 2 seconds"""
+
     def __init__(self, log_queue, shutdown_event):
-        super().__init__()
+        super().__init__(daemon=True, name="attendance-logger")
         self.log_queue = log_queue
         self.shutdown_event = shutdown_event
-        self.logger = logging.getLogger("Logger")
+        self.log = logging.getLogger("logger")
 
     def run(self):
-        self.logger.info("Attendance Logger started")
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+        self.log.info("Attendance logger started")
         batch = []
         last_flush = time.time()
 
         while not self.shutdown_event.is_set():
             try:
+                entry = self.log_queue.get(timeout=1)
+                batch.append(entry)
+            except Empty:
+                pass
+
+            # Flush every 5 entries or every 2 seconds
+            if len(batch) >= 5 or (batch and time.time() - last_flush > 2):
+                self._flush(batch)
+                batch = []
+                last_flush = time.time()
+
+        # Final flush
+        if batch:
+            self._flush(batch)
+        self.log.info("Attendance logger stopped")
+
+    def _flush(self, batch):
+        try:
+            resp = requests.post(
+                f"{API_BASE_URL}/api/internal/worker/attendance",
+                json=batch,
+                headers=api_headers(),
+                timeout=10
+            )
+            if resp.status_code == 200:
+                self.log.debug(f"Flushed {len(batch)} attendance records")
+            else:
+                self.log.error(f"Attendance API error: {resp.status_code} {resp.text}")
+        except Exception as e:
+            self.log.error(f"Attendance flush failed: {e}")
+
+
+# --- ORCHESTRATOR ---
+
+class WorkerOrchestrator:
+    """
+    Main controller: loads config from API, manages camera threads.
+    Single model instance shared across all threads.
+    """
+
+    def __init__(self):
+        self.workers = {}
+        self.log_queue = Queue()
+        self.shutdown_event = threading.Event()
+        self.face_data = {'matrix': np.empty((0, 512), dtype=np.float32), 'ids': [], 'names': []}
+        self.log = logging.getLogger("orchestrator")
+
+    def _signal_handler(self, signum, frame):
+        self.log.info("Shutdown signal received")
+        self.shutdown_event.set()
+
+    def load_cameras(self):
+        """Load camera list from backend API"""
+        try:
+            resp = requests.get(
+                f"{API_BASE_URL}/api/internal/worker/cameras",
+                headers=api_headers(),
+                timeout=10
+            )
+            if resp.status_code != 200:
+                self.log.error(f"Failed to load cameras: HTTP {resp.status_code}")
+                return []
+            return resp.json()
+        except Exception as e:
+            self.log.error(f"Failed to load cameras: {e}")
+            return []
+
+    def load_faces(self):
+        """Load known face embeddings from backend API"""
+        try:
+            resp = requests.get(
+                f"{API_BASE_URL}/api/internal/worker/faces",
+                headers=api_headers(),
+                timeout=10
+            )
+            if resp.status_code != 200:
+                self.log.error(f"Failed to load faces: HTTP {resp.status_code}")
+                return
+
+            faces_json = resp.json()
+            raw_faces = []
+            for f in faces_json:
                 try:
-                    log_entry = self.log_queue.get(timeout=1)
-                    batch.append(log_entry)
+                    vec = np.array(json.loads(f['encoding']), dtype=np.float32)
+                    if vec.shape[0] == 512:
+                        raw_faces.append((f['id'], f['name'], vec))
                 except Exception:
                     pass
 
-                # Flush batch every 5 entries or every 2 seconds
-                if len(batch) >= 5 or (batch and time.time() - last_flush > 2):
-                    self._flush_batch(conn, batch)
-                    batch.clear()
-                    last_flush = time.time()
-
-            except Exception as e:
-                self.logger.error(f"Logger error: {e}")
-
-        # Flush remaining on shutdown
-        if batch:
-            self._flush_batch(conn, batch)
-        conn.close()
-        self.logger.info("Logger stopped")
-
-    def _flush_batch(self, conn, batch):
-        """Write a batch of log entries to the database"""
-        try:
-            cursor = conn.cursor()
-            cursor.executemany(
-                """INSERT INTO attendance_log
-                   (employee_id, camera_id, timestamp, confidence, event_type)
-                   VALUES (?, ?, ?, ?, ?)""",
-                [(
-                    e['employee_id'], e['camera_id'],
-                    e['timestamp'], e['confidence'], e['event_type']
-                ) for e in batch]
-            )
-            conn.commit()
+            matrix, ids, names = build_face_matrix(raw_faces)
+            self.face_data = {'matrix': matrix, 'ids': ids, 'names': names}
+            self.log.info(f"Loaded {len(ids)} known faces")
         except Exception as e:
-            self.logger.error(f"Batch DB write failed: {e}")
+            self.log.error(f"Failed to load faces: {e}")
 
+    def _face_reload_loop(self):
+        """Periodically reload face database"""
+        while not self.shutdown_event.is_set():
+            time.sleep(FACE_RELOAD_INTERVAL)
+            if self.shutdown_event.is_set():
+                break
+            self.load_faces()
 
-class MultiCameraOrchestrator:
-    """Main process: manages worker processes and configuration."""
-    def __init__(self):
-        self.workers = {}  # camera_id -> (worker, camera_url)
-        self.log_queue = Queue()
-        self.detection_queue = Queue(maxsize=100)
-        self.shutdown_event = Event()
-        self.logger_process = None
-        self.logger = logging.getLogger("Orchestrator")
-
+    def run(self):
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
-    def _signal_handler(self, signum, frame):
-        self.logger.info("Shutdown signal received, stopping workers...")
+        self.log.info("=" * 60)
+        self.log.info("  Surveillance AI Worker — Starting")
+        self.log.info(f"  API: {API_BASE_URL}")
+        self.log.info(f"  Threshold: {THRESHOLD}, Cooldown: {COOLDOWN}s, FrameSkip: {FRAME_SKIP}")
+        self.log.info(f"  Process Width: {PROCESS_WIDTH}px")
+        self.log.info("=" * 60)
+
+        # Load face recognition model (once, shared by all threads)
+        self.log.info("Loading face recognition model...")
+        t0 = time.time()
+        face_engine.load()
+        self.log.info(f"Model loaded in {time.time() - t0:.1f}s")
+
+        # Wait for backend to be ready
+        self._wait_for_backend()
+
+        # Load cameras from API
+        cameras = self.load_cameras()
+        if not cameras:
+            self.log.warning("No cameras with face recognition enabled. Exiting.")
+            return
+
+        # Load known faces
+        self.load_faces()
+
+        # Start attendance logger
+        att_logger = AttendanceLogger(self.log_queue, self.shutdown_event)
+        att_logger.start()
+
+        # Start face reload thread
+        face_reloader = threading.Thread(target=self._face_reload_loop, daemon=True, name="face-reload")
+        face_reloader.start()
+
+        # Start camera workers
+        num_workers = min(len(cameras), MAX_WORKERS)
+        self.log.info(f"Starting {num_workers} camera workers")
+
+        for cam in cameras[:num_workers]:
+            worker = CameraWorker(
+                camera_id=cam['id'],
+                camera_url=cam['stream_url'],
+                camera_name=cam['name'],
+                face_data=self.face_data,
+                log_queue=self.log_queue,
+                shutdown_event=self.shutdown_event
+            )
+            worker.start()
+            self.workers[cam['id']] = worker
+
+        # Monitor loop
+        self.log.info("All workers started. Monitoring...")
+        try:
+            while not self.shutdown_event.is_set():
+                self.shutdown_event.wait(timeout=5)
+
+                # Check worker health
+                for cam_id, worker in list(self.workers.items()):
+                    if not worker.is_alive() and not self.shutdown_event.is_set():
+                        self.log.warning(f"Worker for camera {cam_id} died, respawning...")
+                        cam_info = next((c for c in cameras if c['id'] == cam_id), None)
+                        if cam_info:
+                            new_worker = CameraWorker(
+                                camera_id=cam_info['id'],
+                                camera_url=cam_info['stream_url'],
+                                camera_name=cam_info['name'],
+                                face_data=self.face_data,
+                                log_queue=self.log_queue,
+                                shutdown_event=self.shutdown_event
+                            )
+                            new_worker.start()
+                            self.workers[cam_id] = new_worker
+        except KeyboardInterrupt:
+            self.log.info("Keyboard interrupt received")
+            self.shutdown_event.set()
+
+        self.log.info("Shutting down workers...")
         self.shutdown_event.set()
 
-    def load_cameras_from_db(self):
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=10)
-            cursor = conn.cursor()
-            cursor.execute(
-                """SELECT id, protocol, ip_address, port, username, password, path, connection_type, dvr_url
-                   FROM camera WHERE active=1 AND face_recognition_enabled=1"""
-            )
-            cameras = []
-            for row in cursor.fetchall():
-                cam_id, protocol, ip, port, user, pwd, path, conn_type, dvr_url = row
+        # Wait for threads to finish
+        for worker in self.workers.values():
+            worker.join(timeout=5)
 
-                if conn_type == 'dvr' and dvr_url:
-                    cameras.append((cam_id, dvr_url))
-                    continue
+        self.log.info("All workers stopped. Goodbye!")
 
-                if protocol == 'local':
-                    try:
-                        url = int(path) if path else 0
-                    except Exception:
-                        url = path or 0
-                    cameras.append((cam_id, url))
-                    continue
-                if protocol == 'file':
-                    cameras.append((cam_id, path))
-                    continue
-
-                creds = f"{user}:{pwd}@" if user and pwd else (f"{user}@" if user else "")
-                url = f"{protocol}://{creds}{ip}:{port}{path}"
-                cameras.append((cam_id, url))
-            conn.close()
-            return cameras
-        except Exception as e:
-            self.logger.error(f"Failed to load cameras: {e}")
-            return []
-
-    def load_known_faces(self):
-        """Load known faces and pre-build normalized matrix for vectorized matching"""
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=10)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, name, face_encoding FROM employee WHERE active=1")
-            raw_faces = []
-            for emp_id, name, encoding in cursor.fetchall():
-                if encoding:
-                    try:
-                        vec = np.array(json.loads(encoding), dtype=np.float32)
-                        if vec.shape[0] == 512:
-                            raw_faces.append((emp_id, name, vec))
-                    except Exception:
-                        pass
-            conn.close()
-
-            matrix, ids, names = build_face_matrix(raw_faces)
-            self.logger.info(f"Loaded {len(ids)} known faces (matrix shape: {matrix.shape})")
-            return matrix, ids, names
-        except Exception as e:
-            self.logger.error(f"Failed to load known faces: {e}")
-            return np.empty((0, 512), dtype=np.float32), [], []
-
-    def _spawn_worker(self, camera_id, camera_url, face_matrix, face_ids, face_names):
-        """Create and start a camera worker process"""
-        worker = CameraWorkerProcess(
-            camera_id, camera_url, face_matrix, face_ids, face_names,
-            self.log_queue, self.detection_queue, self.shutdown_event
-        )
-        worker.start()
-        self.workers[camera_id] = (worker, camera_url)
-        self.logger.info(f"Worker started for camera {camera_id}")
-        return worker
-
-    def run(self):
-        try:
-            self.logger.info("Starting Multi-Camera Orchestrator")
-            face_engine.load()
-
-            cameras = self.load_cameras_from_db()
-            face_matrix, face_ids, face_names = self.load_known_faces()
-
-            if not cameras:
-                self.logger.warning("No cameras configured. Exiting.")
-                return
-            if len(face_ids) == 0:
-                self.logger.warning("No known faces loaded. System will detect but not recognize.")
-
-            # Start attendance logger process
-            self.logger_process = AttendanceLogger(self.log_queue, self.shutdown_event)
-            self.logger_process.start()
-
-            num_workers = min(len(cameras), MAX_WORKERS)
-            self.logger.info(f"Starting {num_workers} camera workers")
-
-            for camera_id, camera_url in cameras[:num_workers]:
-                self._spawn_worker(camera_id, camera_url, face_matrix, face_ids, face_names)
-
-            # Monitor loop with auto-respawn
-            while not self.shutdown_event.is_set():
-                for cam_id, (worker, cam_url) in list(self.workers.items()):
-                    if not worker.is_alive() and not self.shutdown_event.is_set():
-                        self.logger.warning(f"Worker for camera {cam_id} died — respawning...")
-                        self._spawn_worker(cam_id, cam_url, face_matrix, face_ids, face_names)
-                time.sleep(5)
-
-            self.logger.info("Waiting for workers to finish...")
-            all_processes = [w for w, _ in self.workers.values()]
-            if self.logger_process:
-                all_processes.append(self.logger_process)
-
-            for proc in all_processes:
-                proc.join(timeout=5)
-                if proc.is_alive():
-                    self.logger.warning(f"Force terminating {proc.name}")
-                    proc.terminate()
-
-            self.logger.info("All workers stopped. Goodbye!")
-
-        except Exception as e:
-            self.logger.error(f"Orchestrator error: {e}", exc_info=True)
-        finally:
-            self.shutdown_event.set()
-            for cam_id, (worker, _) in self.workers.items():
-                if worker.is_alive():
-                    worker.terminate()
-            if self.logger_process and self.logger_process.is_alive():
-                self.logger_process.terminate()
+    def _wait_for_backend(self, max_wait=60):
+        """Wait for backend API to be available"""
+        start = time.time()
+        while time.time() - start < max_wait:
+            try:
+                resp = requests.get(f"{API_BASE_URL}/api/health", timeout=5)
+                if resp.status_code == 200:
+                    self.log.info("Backend API is ready")
+                    return
+            except Exception:
+                pass
+            self.log.info("Waiting for backend API...")
+            time.sleep(3)
+        self.log.warning("Backend API not responding, proceeding anyway")
 
 
 def main():
-    orchestrator = MultiCameraOrchestrator()
+    orchestrator = WorkerOrchestrator()
     orchestrator.run()
 
 
