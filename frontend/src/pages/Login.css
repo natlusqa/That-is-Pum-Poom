@@ -100,6 +100,51 @@
   background: rgba(15, 23, 42, 0.8);
 }
 
+[data-theme='light'] .login-card .form-control {
+  background: #ffffff;
+  border-color: rgba(51, 65, 85, 0.22);
+  color: #0f172a;
+}
+
+[data-theme='light'] .login-card .form-control::placeholder {
+  color: #64748b;
+}
+
+[data-theme='light'] .login-card .form-control:focus {
+  background: #ffffff;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14);
+}
+
+.password-input-wrap {
+  position: relative;
+}
+
+.password-input-wrap .form-control {
+  padding-right: 44px;
+}
+
+.password-toggle-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--radius-sm);
+}
+
+.password-toggle-btn:hover {
+  color: var(--text-primary);
+  background: rgba(148, 163, 184, 0.12);
+}
+
 .btn-block {
   width: 100%;
   margin-top: 8px;

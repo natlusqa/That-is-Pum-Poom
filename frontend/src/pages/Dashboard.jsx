@@ -4,7 +4,7 @@ import {
   FiVideo, FiMapPin, FiWifi, FiUsers, FiActivity, FiPlus,
   FiCpu, FiRefreshCcw
 } from 'react-icons/fi';
-import { cameraAPI, employeeAPI, attendanceAPI } from '../services/api';
+import { cameraAPI, employeeAPI, attendanceAPI, authAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import './Dashboard.css';
 
@@ -12,30 +12,48 @@ function CameraThumbnail({ cameraId, isOnline }) {
   const [src, setSrc] = useState('');
   const [error, setError] = useState(false);
 
-  const loadPoster = useCallback(() => {
-    if (!isOnline) return;
+  const loadPoster = useCallback(async () => {
     const token = localStorage.getItem('token');
-    fetch(`/api/cameras/${cameraId}/poster`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
-      .then(res => {
-        if (!res.ok) throw new Error('Failed');
-        return res.blob();
-      })
-      .then(blob => {
-        setSrc(prev => {
-          if (prev) URL.revokeObjectURL(prev);
-          return URL.createObjectURL(blob);
-        });
-        setError(false);
-      })
-      .catch(() => setError(true));
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+
+    const fetchAsBlobUrl = async (url) => {
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      setSrc(prev => {
+        if (prev) URL.revokeObjectURL(prev);
+        return URL.createObjectURL(blob);
+      });
+      setError(false);
+    };
+
+    try {
+      if (isOnline) {
+        await fetchAsBlobUrl(`/api/cameras/${cameraId}/poster`);
+        return;
+      }
+    } catch {
+      // fallback below
+    }
+
+    try {
+      await fetchAsBlobUrl(`/api/cameras/${cameraId}/last-frame`);
+    } catch {
+      setError(true);
+    }
   }, [cameraId, isOnline]);
 
   useEffect(() => {
     loadPoster();
     if (isOnline) {
       const interval = setInterval(loadPoster, 15000);
+      return () => {
+        clearInterval(interval);
+        if (src) URL.revokeObjectURL(src);
+      };
+    } else {
+      // For offline cameras, refresh last saved frame less often.
+      const interval = setInterval(loadPoster, 60000);
       return () => {
         clearInterval(interval);
         if (src) URL.revokeObjectURL(src);
@@ -47,12 +65,12 @@ function CameraThumbnail({ cameraId, isOnline }) {
     return (
       <div className="camera-thumb-placeholder">
         <FiVideo size={32} />
-        {!isOnline && <span>Offline</span>}
+        {!isOnline && <span>Не в сети</span>}
       </div>
     );
   }
 
-  return <img src={src} alt="Camera feed" className="camera-thumb-img" />;
+  return <img src={src} alt="Поток с камеры" className="camera-thumb-img" />;
 }
 
 function Dashboard() {
@@ -61,6 +79,8 @@ function Dashboard() {
   const [todayEvents, setTodayEvents] = useState(0);
   const [loading, setLoading] = useState(true);
   const { addToast } = useToast();
+  const currentUser = authAPI.getCurrentUser();
+  const canManageCameras = ['admin', 'super_admin'].includes(currentUser?.role);
 
   useEffect(() => {
     loadDashboard();
@@ -86,7 +106,7 @@ function Dashboard() {
         // Stats may fail if no logs yet
       }
     } catch {
-      addToast('Failed to load dashboard data', 'error');
+      addToast('Не удалось загрузить данные панели', 'error');
     } finally {
       setLoading(false);
     }
@@ -107,14 +127,16 @@ function Dashboard() {
     <div className="page-container">
       <div className="container">
         <div className="page-header flex-between">
-          <h1><FiActivity /> Dashboard</h1>
+          <h1><FiActivity /> Панель</h1>
           <div className="btn-group">
             <button className="btn btn-secondary btn-sm" onClick={loadDashboard}>
-              <FiRefreshCcw /> Refresh
+              <FiRefreshCcw /> Обновить
             </button>
-            <Link to="/cameras" className="btn btn-primary btn-sm">
-              <FiPlus /> Add Camera
-            </Link>
+            {canManageCameras && (
+              <Link to="/cameras" className="btn btn-primary btn-sm">
+                <FiPlus /> Добавить камеру
+              </Link>
+            )}
           </div>
         </div>
 
@@ -123,59 +145,63 @@ function Dashboard() {
           <div className="stat-card">
             <div className="stat-icon stat-icon-blue"><FiVideo /></div>
             <div className="stat-content">
-              <div className="stat-label">Cameras</div>
+              <div className="stat-label">Камеры</div>
               <div className="stat-value">{cameras.length}</div>
-              <div className="stat-sub">{onlineCameras} online</div>
+              <div className="stat-sub">{onlineCameras} в сети</div>
             </div>
           </div>
 
           <div className="stat-card">
             <div className="stat-icon stat-icon-green"><FiWifi /></div>
             <div className="stat-content">
-              <div className="stat-label">Online</div>
+              <div className="stat-label">Онлайн</div>
               <div className="stat-value">{onlineCameras}</div>
-              <div className="stat-sub">of {cameras.length} total</div>
+              <div className="stat-sub">из {cameras.length} всего</div>
             </div>
           </div>
 
           <div className="stat-card">
             <div className="stat-icon stat-icon-purple"><FiUsers /></div>
             <div className="stat-content">
-              <div className="stat-label">Employees</div>
+              <div className="stat-label">Сотрудники</div>
               <div className="stat-value">{employeeCount}</div>
-              <div className="stat-sub">registered</div>
+              <div className="stat-sub">зарегистрировано</div>
             </div>
           </div>
 
           <div className="stat-card">
             <div className="stat-icon stat-icon-amber"><FiActivity /></div>
             <div className="stat-content">
-              <div className="stat-label">Detections</div>
+              <div className="stat-label">Обнаружения</div>
               <div className="stat-value">{todayEvents}</div>
-              <div className="stat-sub">today</div>
+              <div className="stat-sub">сегодня</div>
             </div>
           </div>
         </div>
 
         {/* Camera Grid */}
         <div className="dashboard-section-header">
-          <h2><FiVideo /> Live Cameras</h2>
+          <h2><FiVideo /> Камеры в реальном времени</h2>
           <div className="flex gap-2">
             {aiCameras > 0 && (
               <span className="badge badge-info"><FiCpu size={10} /> {aiCameras} AI</span>
             )}
-            <Link to="/cameras" className="btn btn-ghost btn-sm">Manage</Link>
+            {canManageCameras && (
+              <Link to="/cameras" className="btn btn-ghost btn-sm">Управление</Link>
+            )}
           </div>
         </div>
 
         {cameras.length === 0 ? (
           <div className="empty-state">
             <FiVideo size={56} />
-            <h2>No cameras added</h2>
-            <p>Add your first camera to start monitoring</p>
-            <Link to="/cameras" className="btn btn-primary mt-2">
-              <FiPlus /> Add Camera
-            </Link>
+            <h2>Камеры не добавлены</h2>
+            <p>Добавьте первую камеру, чтобы начать мониторинг</p>
+            {canManageCameras && (
+              <Link to="/cameras" className="btn btn-primary mt-2">
+                <FiPlus /> Добавить камеру
+              </Link>
+            )}
           </div>
         ) : (
           <div className="camera-grid">
@@ -188,7 +214,7 @@ function Dashboard() {
                   )}
                   <div className="camera-status-indicator">
                     <span className={`status-dot ${camera.is_online ? 'status-dot-online' : 'status-dot-offline'}`} />
-                    {camera.is_online ? 'Online' : 'Offline'}
+                    {camera.is_online ? 'В сети' : 'Не в сети'}
                   </div>
                 </div>
                 <div className="camera-info">

@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Layout from './components/Layout/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
 import { authAPI } from './services/api';
@@ -14,9 +14,16 @@ import CameraView from './pages/CameraView';
 import Attendance from './pages/Attendance';
 import Users from './pages/Users';
 import Recordings from './pages/Playback';
+import LoginHistory from './pages/LoginHistory';
+
+const THEME_STORAGE_KEY = 'ui_theme';
 
 function App() {
   const [user, setUser] = useState(() => authAPI.getCurrentUser());
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    return saved === 'light' ? 'light' : 'dark';
+  });
 
   const handleLogin = useCallback((nextUser, token) => {
     localStorage.setItem('token', token);
@@ -29,12 +36,23 @@ function App() {
     setUser(null);
   }, []);
 
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
   const layoutProps = useMemo(
     () => ({
       user,
       onLogout: handleLogout,
+      theme,
+      onToggleTheme: toggleTheme,
     }),
-    [user, handleLogout]
+    [user, handleLogout, theme, toggleTheme]
   );
 
   return (
@@ -89,6 +107,14 @@ function App() {
           />
           <Route path="attendance" element={<Attendance />} />
           <Route path="recordings" element={<Recordings />} />
+          <Route
+            path="login-history"
+            element={
+              <ProtectedRoute roles={['admin', 'super_admin']}>
+                <LoginHistory />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="users"
             element={

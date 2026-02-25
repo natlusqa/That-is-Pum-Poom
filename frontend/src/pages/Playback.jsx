@@ -16,6 +16,13 @@ function Playback() {
   const [activeRecording, setActiveRecording] = useState(null);
   const { addToast } = useToast();
 
+  const eventTypeLabel = (type) => {
+    if (type === 'face') return 'Распознавание лица';
+    if (type === 'motion') return 'Движение';
+    if (type === 'manual') return 'Вручную';
+    return type;
+  };
+
   useEffect(() => {
     loadCameras();
   }, []);
@@ -35,7 +42,7 @@ function Playback() {
         setSelectedCamera(String(res.data[0].id));
       }
     } catch {
-      addToast('Failed to load cameras', 'error');
+      addToast('Не удалось загрузить камеры', 'error');
     } finally {
       setLoading(false);
     }
@@ -75,14 +82,14 @@ function Playback() {
   };
 
   const deleteRecording = async (id) => {
-    if (!window.confirm('Delete this recording?')) return;
+    if (!window.confirm('Удалить эту запись?')) return;
     try {
       await api.delete(`/recordings/${id}`);
-      addToast('Recording deleted', 'success');
+      addToast('Запись удалена', 'success');
       setRecordings(prev => prev.filter(r => r.id !== id));
       if (activeRecording?.id === id) setActiveRecording(null);
     } catch {
-      addToast('Failed to delete recording', 'error');
+      addToast('Не удалось удалить запись', 'error');
     }
   };
 
@@ -123,13 +130,13 @@ function Playback() {
     <div className="page-container">
       <div className="container">
         <div className="page-header">
-          <h1><FiFilm /> Recordings</h1>
+          <h1><FiFilm /> Записи</h1>
         </div>
 
         {/* Filters */}
         <div className="playback-controls">
           <div className="filter-group">
-            <label><FiVideo size={12} /> Camera</label>
+            <label><FiVideo size={12} /> Камера</label>
             <select
               className="form-control"
               value={selectedCamera}
@@ -141,7 +148,7 @@ function Playback() {
             </select>
           </div>
           <div className="filter-group">
-            <label><FiCalendar size={12} /> Date</label>
+            <label><FiCalendar size={12} /> Дата</label>
             <input
               type="date"
               className="form-control"
@@ -167,14 +174,14 @@ function Playback() {
             ) : (
               <div className="playback-video-empty">
                 <FiPlay size={48} />
-                <p>Select a recording to play</p>
+                <p>Выберите запись для воспроизведения</p>
               </div>
             )}
 
             {/* Timeline Scrubber */}
             <div className="timeline-container">
               <div className="timeline-header">
-                <h3>Timeline - {selectedDate}</h3>
+                <h3>Таймлайн - {selectedDate}</h3>
               </div>
 
               <div className="timeline-bar">
@@ -183,7 +190,7 @@ function Playback() {
                     key={i}
                     className={`timeline-segment timeline-segment-${seg.event_type || 'face'}`}
                     style={{ left: `${seg.leftPct}%`, width: `${seg.widthPct}%` }}
-                    title={`${seg.event_type} - ${formatTime(seg.start_time)}`}
+                    title={`${eventTypeLabel(seg.event_type)} - ${formatTime(seg.start_time)}`}
                     onClick={() => {
                       const rec = recordings.find(r => r.id === seg.id);
                       if (rec) playRecording(rec);
@@ -199,15 +206,15 @@ function Playback() {
               <div className="timeline-legend">
                 <div className="timeline-legend-item">
                   <div className="timeline-legend-dot" style={{ background: 'var(--danger)' }}></div>
-                  Face detection
+                  Распознавание лица
                 </div>
                 <div className="timeline-legend-item">
                   <div className="timeline-legend-dot" style={{ background: 'var(--info)' }}></div>
-                  Motion
+                  Движение
                 </div>
                 <div className="timeline-legend-item">
                   <div className="timeline-legend-dot" style={{ background: 'var(--success)' }}></div>
-                  Manual
+                  Вручную
                 </div>
               </div>
             </div>
@@ -216,12 +223,12 @@ function Playback() {
           {/* Events panel */}
           <div className="events-panel">
             <div className="events-panel-header">
-              Recordings ({recordings.length})
+              Записи ({recordings.length})
             </div>
 
             {recordings.length === 0 ? (
               <div className="events-empty">
-                No recordings for this date
+                Нет записей за эту дату
               </div>
             ) : (
               recordings.map(rec => (
@@ -239,7 +246,7 @@ function Playback() {
                     }}
                   />
                   <div className="event-details">
-                    <strong>{rec.employee_name || rec.event_type}</strong>
+                    <strong>{rec.employee_name || eventTypeLabel(rec.event_type)}</strong>
                     <small>{rec.camera_name}</small>
                   </div>
                   <div className="event-time">
@@ -248,7 +255,7 @@ function Playback() {
                   <button
                     className="btn-icon"
                     onClick={(e) => { e.stopPropagation(); deleteRecording(rec.id); }}
-                    title="Delete"
+                    title="Удалить"
                   >
                     <FiTrash2 size={14} />
                   </button>
