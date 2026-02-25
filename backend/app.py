@@ -21,7 +21,7 @@ from dateutil import parser as date_parser
 from collections import defaultdict, deque
 
 from face_core import face_engine
-from camera_discovery import CameraDiscovery
+from camera_discovery import SmartCameraDiscovery
 
 # --- LOGGING ---
 logging.basicConfig(
@@ -915,58 +915,89 @@ def camera_heartbeat(camera_id):
 
 
 
-# --- CAMERA DISCOVERY ---
+# --- CAMERA AUTO-DISCOVERY ---
 
-discovery_state = {'scanning': False, 'results': [], 'network': '192.168.1.0/24'}
+discovery_state = {
+    'scanning': False,
+    'stage': '',
+    'message': '',
+    'progress': 0,
+    'results': [],
+    'error': None,
+}
+_discovery_instance = None
+
+
+def _discovery_callback(stage, message, progress):
+    """Progress callback from SmartCameraDiscovery."""
+    discovery_state['stage'] = stage
+    discovery_state['message'] = message
+    discovery_state['progress'] = progress
 
 
 @app.route('/api/camera-discovery/scan', methods=['POST'])
 @token_required
 @role_required('admin', 'super_admin')
 def start_camera_discovery(current_user):
-    """Start automatic camera discovery scan in network."""
+    """One-click auto-discovery: finds ALL cameras on all local networks."""
+    global _discovery_instance
+
     if discovery_state['scanning']:
         return jsonify({'error': 'Scan already in progress'}), 400
 
-    data = request.get_json() or {}
-    network = data.get('network', '192.168.1.0/24')
-
     discovery_state['scanning'] = True
-    discovery_state['network'] = network
+    discovery_state['stage'] = 'starting'
+    discovery_state['message'] = 'Initializing auto-discovery...'
+    discovery_state['progress'] = 0
     discovery_state['results'] = []
+    discovery_state['error'] = None
 
     def scan_in_background():
+        global _discovery_instance
         try:
-            scanner = CameraDiscovery(network=network, timeout=3)
-            results = scanner.scan(max_workers=15)
+            _discovery_instance = SmartCameraDiscovery(callback=_discovery_callback)
+            results = _discovery_instance.discover()
             discovery_state['results'] = results
-            logger.info(f"Camera discovery complete: {len(results)} endpoints found")
+            logger.info(f"Auto-discovery complete: {len(results)} verified cameras found")
         except Exception as e:
-            logger.error(f"Camera discovery failed: {e}")
+            logger.error(f"Auto-discovery failed: {e}")
+            discovery_state['error'] = str(e)
             discovery_state['results'] = []
         finally:
             discovery_state['scanning'] = False
+            _discovery_instance = None
 
-    # Run scan in background thread
     import threading
     thread = threading.Thread(target=scan_in_background, daemon=True)
     thread.start()
 
-    return jsonify({
-        'message': 'Discovery scan started',
-        'network': network
-    }), 202
+    return jsonify({'message': 'Auto-discovery started'}), 202
+
+
+@app.route('/api/camera-discovery/stop', methods=['POST'])
+@token_required
+@role_required('admin', 'super_admin')
+def stop_camera_discovery(current_user):
+    """Stop a running auto-discovery scan."""
+    global _discovery_instance
+    if _discovery_instance:
+        _discovery_instance.stop()
+    discovery_state['scanning'] = False
+    return jsonify({'message': 'Discovery stopped'})
 
 
 @app.route('/api/camera-discovery/status', methods=['GET'])
 @token_required
 def get_discovery_status(current_user):
-    """Get discovery status and results."""
+    """Get auto-discovery progress and results."""
     return jsonify({
         'scanning': discovery_state['scanning'],
-        'network': discovery_state['network'],
+        'stage': discovery_state['stage'],
+        'message': discovery_state['message'],
+        'progress': discovery_state['progress'],
         'found_count': len(discovery_state['results']),
-        'results': discovery_state['results'][:50]  # Limit to first 50 results
+        'results': discovery_state['results'],
+        'error': discovery_state['error'],
     })
 
 
@@ -974,16 +1005,24 @@ def get_discovery_status(current_user):
 @token_required
 @role_required('admin', 'super_admin')
 def add_discovered_camera(current_user):
-    """Add a discovered camera to the system."""
+    """Add a single discovered camera to the system."""
     data = request.get_json()
 
+    # Check for duplicate by IP + port
+    existing = Camera.query.filter_by(
+        ip_address=data.get('ip_address'),
+        port=data.get('port', 554)
+    ).first()
+    if existing:
+        return jsonify({'error': 'Camera already exists', 'id': existing.id}), 409
+
     camera = Camera(
-        name=data.get('name', f"Камера {data.get('ip_address')}"),
-        connection_type='direct',
+        name=data.get('name', f"Camera {data.get('ip_address')}"),
+        connection_type=data.get('connection_type', 'direct'),
         location=data.get('location', ''),
         ip_address=data.get('ip_address'),
         port=data.get('port', 554),
-        username=data.get('username', 'admin'),
+        username=data.get('username', ''),
         password=data.get('password', ''),
         protocol=data.get('protocol', 'rtsp'),
         path=data.get('path', '/stream'),
@@ -998,6 +1037,56 @@ def add_discovered_camera(current_user):
         'message': 'Camera added successfully',
         'id': camera.id,
         'name': camera.name
+    }), 201
+
+
+@app.route('/api/camera-discovery/add-all', methods=['POST'])
+@token_required
+@role_required('admin', 'super_admin')
+def add_all_discovered_cameras(current_user):
+    """Add ALL verified discovered cameras to the system at once."""
+    results = discovery_state.get('results', [])
+    verified = [r for r in results if r.get('verified')]
+
+    if not verified:
+        return jsonify({'error': 'No verified cameras to add'}), 400
+
+    added = []
+    skipped = []
+
+    for cam in verified:
+        existing = Camera.query.filter_by(
+            ip_address=cam['ip_address'],
+            port=cam['port']
+        ).first()
+        if existing:
+            skipped.append(cam['ip_address'])
+            continue
+
+        camera = Camera(
+            name=cam.get('name', f"Camera {cam['ip_address']}"),
+            connection_type=cam.get('connection_type', 'direct'),
+            location='',
+            ip_address=cam['ip_address'],
+            port=cam['port'],
+            username=cam.get('username', ''),
+            password=cam.get('password', ''),
+            protocol=cam.get('protocol', 'rtsp'),
+            path=cam.get('path', '/stream'),
+            active=True,
+            face_recognition_enabled=False
+        )
+        db.session.add(camera)
+        added.append(cam['ip_address'])
+
+    db.session.commit()
+
+    return jsonify({
+        'message': f'Added {len(added)} cameras, skipped {len(skipped)} duplicates',
+        'added_count': len(added),
+        'skipped_count': len(skipped),
+        'added_ips': added,
+        'skipped_ips': skipped,
     }), 201
 
 # --- ATTENDANCE LOGS ---

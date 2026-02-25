@@ -52,6 +52,15 @@ export const cameraAPI = {
   getVideoUrl: (id) => `${API_BASE_URL}/video/${id}`,
 };
 
+// --- CAMERA DISCOVERY ---
+export const discoveryAPI = {
+  startScan: () => api.post('/camera-discovery/scan'),
+  stopScan: () => api.post('/camera-discovery/stop'),
+  getStatus: () => api.get('/camera-discovery/status'),
+  addCamera: (data) => api.post('/camera-discovery/add', data),
+  addAll: () => api.post('/camera-discovery/add-all'),
+};
+
 // --- EMPLOYEES ---
 export const employeeAPI = {
   getAll: () => api.get('/employees'),
