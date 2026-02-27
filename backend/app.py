@@ -940,6 +940,23 @@ def add_camera(current_user):
 
     db.session.add(camera)
     db.session.commit()
+
+    # Register stream in go2rtc
+    stream_url = camera.get_stream_url()
+    if stream_url:
+        try:
+            import requests as http_requests
+            go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+            go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+            base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+            http_requests.put(base, params={'src': stream_url, 'name': f'camera_{camera.id}_raw'}, timeout=5)
+            http_requests.put(base, params={
+                'src': f'ffmpeg:camera_{camera.id}_raw#video=h264',
+                'name': f'camera_{camera.id}'
+            }, timeout=5)
+        except Exception:
+            pass
+
     return jsonify({'message': 'Camera created', 'id': camera.id}), 201
 
 
@@ -1183,6 +1200,28 @@ def add_all_discovered_cameras(current_user):
         added.append(cam['ip_address'])
 
     db.session.commit()
+
+    # Register all newly added cameras in go2rtc
+    try:
+        import requests as http_requests
+        go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+        go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+        base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+        for ip in added:
+            cam_obj = Camera.query.filter_by(ip_address=ip).first()
+            if cam_obj:
+                stream_url = cam_obj.get_stream_url()
+                if stream_url:
+                    try:
+                        http_requests.put(base, params={'src': stream_url, 'name': f'camera_{cam_obj.id}_raw'}, timeout=5)
+                        http_requests.put(base, params={
+                            'src': f'ffmpeg:camera_{cam_obj.id}_raw#video=h264',
+                            'name': f'camera_{cam_obj.id}'
+                        }, timeout=5)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
 
     return jsonify({
         'message': f'Added {len(added)} cameras, skipped {len(skipped)} duplicates',
