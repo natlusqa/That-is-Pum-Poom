@@ -6,21 +6,18 @@ api:
 
 rtsp:
   listen: ":8554"
-  timeout: 5s
+  timeout: 10s
 
-# MSE over WebSocket is the primary streaming method (0.5-1s latency)
-# WebRTC disabled — MSE provides reliable low-latency without STUN/TURN
+ffmpeg:
+  bin: /usr/bin/ffmpeg
+  # Optimized H264 transcoding: ultrafast preset, minimal GOP, zero latency
+  h264: >-
+    -c:v libx264
+    -g 20
+    -preset ultrafast
+    -tune zerolatency
+    -pix_fmt yuv420p
+    -bf 0
+    -an
 
-# MJPEG fallback for compatibility
-mjpeg:
-  listen: ":8556"
-
-# HLS for mobile/edge cases
-hls:
-  listen: ":8857"
-  segment_duration: 1
-  part_duration: 200ms
-
-# Streams are configured dynamically via the go2rtc API
-# When cameras are added through the web UI, they are automatically registered here
 streams: {}

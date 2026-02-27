@@ -1,289 +1,197 @@
-import { useRef, useEffect, useCallback, useState } from 'react';
+import { useRef, useEffect, useState } from 'react';
+import { VideoRTC } from '../lib/video-rtc.js';
 
 /**
- * MSE (Media Source Extensions) player using go2rtc WebSocket API.
- * Provides ~0.5-1s latency — much better than HLS/MP4 (3-9s).
- *
- * Protocol:
- * 1. Connect WebSocket to /go2rtc/api/ws?src=CAMERA_URL
- * 2. First text message = MIME codec string (e.g. "video/mp4; codecs=\"avc1.640029\"")
- * 3. Subsequent binary messages = fMP4 init segment + media segments
- * 4. Append to MediaSource SourceBuffer for near-real-time playback
+ * MSEPlayer — thin React wrapper around go2rtc's official VideoRTC web component.
+ * Uses the EXACT same code that powers go2rtc's built-in player (the one that works at :1985).
  */
-function MSEPlayer({ cameraUrl, muted = true, onError, onConnected, className }) {
-  const videoRef = useRef(null);
-  const wsRef = useRef(null);
-  const msRef = useRef(null);
-  const sbRef = useRef(null);
-  const queueRef = useRef([]);
-  const reconnectTimer = useRef(null);
+
+// Register the custom element once
+if (!customElements.get('video-rtc')) {
+  customElements.define('video-rtc', VideoRTC);
+}
+
+function MSEPlayer({ cameraUrl, cameraId, muted = true, onError, onConnected, className }) {
+  const containerRef = useRef(null);
+  const rtcRef = useRef(null);
   const [status, setStatus] = useState('connecting');
-  const retryCount = useRef(0);
-  const MAX_RETRIES = 10;
-  const MAX_BUFFER_DURATION = 4; // seconds — trim buffer beyond this
+  const [posterUrl, setPosterUrl] = useState(null);
 
-  const cleanup = useCallback(() => {
-    clearTimeout(reconnectTimer.current);
-    reconnectTimer.current = null;
-
-    if (wsRef.current) {
-      wsRef.current.onopen = null;
-      wsRef.current.onmessage = null;
-      wsRef.current.onerror = null;
-      wsRef.current.onclose = null;
-      if (wsRef.current.readyState < 2) wsRef.current.close();
-      wsRef.current = null;
-    }
-
-    if (sbRef.current) {
-      try {
-        if (msRef.current?.readyState === 'open') {
-          sbRef.current.abort();
+  // Load poster for instant visual feedback
+  useEffect(() => {
+    if (!cameraId) return;
+    const token = localStorage.getItem('token');
+    if (!token) return;
+    let revUrl = null;
+    fetch(`/api/cameras/${cameraId}/poster`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(r => (r.ok ? r.blob() : null))
+      .then(blob => {
+        if (blob && blob.size > 0) {
+          revUrl = URL.createObjectURL(blob);
+          setPosterUrl(revUrl);
         }
-      } catch { /* ignore */ }
-      sbRef.current = null;
-    }
+      })
+      .catch(() => {});
+    return () => { if (revUrl) URL.revokeObjectURL(revUrl); };
+  }, [cameraId]);
 
-    if (msRef.current) {
-      try {
-        if (msRef.current.readyState === 'open') {
-          msRef.current.endOfStream();
-        }
-      } catch { /* ignore */ }
-      msRef.current = null;
-    }
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
 
-    queueRef.current = [];
+    // Create the go2rtc web component
+    const el = document.createElement('video-rtc');
+    el.style.display = 'block';
+    el.style.width = '100%';
+    el.style.height = '100%';
 
-    if (videoRef.current) {
-      videoRef.current.src = '';
-      videoRef.current.load();
-    }
-  }, []);
+    // Configure: WebRTC first (handles H.265 natively = no transcoding = zero latency)
+    // Falls back to MSE (uses H.264 transcode) if WebRTC unavailable
+    el.mode = 'webrtc,mse';
+    el.media = 'video,audio';
+    el.visibilityCheck = false;
+    el.background = true;
 
-  const trimBuffer = useCallback(() => {
-    const sb = sbRef.current;
-    const video = videoRef.current;
-    if (!sb || !video || sb.updating) return;
+    rtcRef.current = el;
+    container.appendChild(el);
 
-    try {
-      if (sb.buffered.length > 0) {
-        const buffEnd = sb.buffered.end(sb.buffered.length - 1);
-        const buffStart = sb.buffered.start(0);
-        const currentTime = video.currentTime;
+    // Use raw stream for WebRTC (H.265 direct), transcoded for MSE fallback
+    // VideoRTC tries WebRTC first; if it works with H.265, no transcoding needed
+    const streamSrc = cameraId ? `camera_${cameraId}` : cameraUrl;
+    const wsUrl = `${location.origin.replace('http', 'ws')}/go2rtc/api/ws?src=${encodeURIComponent(streamSrc)}`;
 
-        // Remove old data that's more than MAX_BUFFER_DURATION behind current time
-        if (currentTime - buffStart > MAX_BUFFER_DURATION) {
-          sb.remove(buffStart, currentTime - 1);
-        }
-
-        // If playback falls behind too much, seek to near-live
-        if (buffEnd - currentTime > 3) {
-          video.currentTime = buffEnd - 0.5;
-        }
+    // Monitor the internal video element for playback
+    const checkVideo = setInterval(() => {
+      const video = el.querySelector('video') || el.video;
+      if (video && video.readyState >= 2 && !video.paused) {
+        setStatus('connected');
+        onConnected?.();
+        clearInterval(checkVideo);
       }
-    } catch { /* ignore */ }
-  }, []);
+    }, 300);
 
-  const appendBuffer = useCallback((data) => {
-    const sb = sbRef.current;
-    if (!sb) return;
-
-    if (sb.updating) {
-      queueRef.current.push(data);
-      return;
-    }
-
-    try {
-      sb.appendBuffer(data);
-    } catch (e) {
-      if (e.name === 'QuotaExceededError') {
-        // Buffer full — trim and retry
-        trimBuffer();
-        queueRef.current.push(data);
-      } else {
-        console.error('MSE append error:', e);
-      }
-    }
-  }, [trimBuffer]);
-
-  const connect = useCallback(() => {
-    if (!cameraUrl) return;
-    cleanup();
-
-    if (retryCount.current >= MAX_RETRIES) {
-      setStatus('error');
-      onError?.('Maximum reconnection attempts reached');
-      return;
-    }
-
-    setStatus('connecting');
-
-    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${location.host}/go2rtc/api/ws?src=${encodeURIComponent(cameraUrl)}`;
-
-    try {
-      const ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        retryCount.current = 0;
-      };
-
-      ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') {
-          // First message: codec MIME type
-          const codecMime = ev.data;
-
-          if (!MediaSource.isTypeSupported(codecMime)) {
-            console.error('Unsupported codec:', codecMime);
-            setStatus('error');
-            onError?.(`Unsupported codec: ${codecMime}`);
-            return;
-          }
-
-          const ms = new MediaSource();
-          msRef.current = ms;
-
-          const video = videoRef.current;
-          if (!video) return;
-
-          video.src = URL.createObjectURL(ms);
-
-          ms.onsourceopen = () => {
-            try {
-              const sb = ms.addSourceBuffer(codecMime);
-              sb.mode = 'segments';
-              sbRef.current = sb;
-
-              sb.onupdateend = () => {
-                // Process queued segments
-                if (queueRef.current.length > 0 && !sb.updating) {
-                  try {
-                    sb.appendBuffer(queueRef.current.shift());
-                  } catch { /* ignore */ }
-                }
-                trimBuffer();
-              };
-
-              setStatus('connected');
-              onConnected?.();
-              retryCount.current = 0;
-            } catch (e) {
-              console.error('Failed to create SourceBuffer:', e);
-              setStatus('error');
-              onError?.('Failed to initialize video decoder');
-            }
-          };
-        } else {
-          // Binary data: fMP4 segment
-          appendBuffer(ev.data);
-        }
-      };
-
-      ws.onerror = () => {
-        // Error will trigger onclose
-      };
-
-      ws.onclose = (ev) => {
-        // Don't reconnect if intentionally closed
-        if (!wsRef.current) return;
-
-        retryCount.current++;
-        const delay = Math.min(1000 * Math.pow(2, retryCount.current - 1), 10000);
-
-        if (retryCount.current < MAX_RETRIES) {
+    // Monitor for errors via WebSocket state
+    const checkWs = setInterval(() => {
+      if (el.wsState === WebSocket.CLOSED && el.pcState === WebSocket.CLOSED) {
+        // Both transports failed
+        if (status !== 'connecting') {
           setStatus('reconnecting');
-          reconnectTimer.current = setTimeout(connect, delay);
-        } else {
-          setStatus('error');
-          onError?.('Stream connection lost');
         }
-      };
-    } catch (err) {
-      console.error('WebSocket connection error:', err);
-      setStatus('error');
-      onError?.('Failed to connect to stream');
-    }
-  }, [cameraUrl, cleanup, appendBuffer, trimBuffer, onError, onConnected]);
-
-  // Auto-play when video has data
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    const handleCanPlay = () => {
-      video.play().catch(() => {
-        // Autoplay blocked — already muted so should work
-      });
-    };
-
-    video.addEventListener('canplay', handleCanPlay);
-    return () => video.removeEventListener('canplay', handleCanPlay);
-  }, []);
-
-  // Keep playback near live edge
-  useEffect(() => {
-    if (status !== 'connected') return;
-
-    const interval = setInterval(() => {
-      const video = videoRef.current;
-      const sb = sbRef.current;
-      if (!video || !sb || sb.buffered.length === 0) return;
-
-      const buffEnd = sb.buffered.end(sb.buffered.length - 1);
-      // If we're more than 2s behind live, jump ahead
-      if (buffEnd - video.currentTime > 2) {
-        video.currentTime = buffEnd - 0.3;
       }
-    }, 3000);
+    }, 2000);
 
-    return () => clearInterval(interval);
-  }, [status]);
+    // Start the stream
+    el.src = wsUrl;
 
+    // Set muted on internal video once it appears
+    const muteInterval = setInterval(() => {
+      const video = el.querySelector('video') || el.video;
+      if (video) {
+        video.muted = muted;
+        video.playsInline = true;
+        clearInterval(muteInterval);
+      }
+    }, 100);
+
+    return () => {
+      clearInterval(checkVideo);
+      clearInterval(checkWs);
+      clearInterval(muteInterval);
+
+      // Disconnect the web component
+      if (rtcRef.current) {
+        try { rtcRef.current.ondisconnect(); } catch {}
+        rtcRef.current = null;
+      }
+
+      // Remove from DOM
+      while (container.firstChild) {
+        container.removeChild(container.firstChild);
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraUrl, cameraId]);
+
+  // Update muted state on the fly
   useEffect(() => {
-    connect();
-    return cleanup;
-  }, [connect, cleanup]);
+    const el = rtcRef.current;
+    if (!el) return;
+    const video = el.querySelector('video') || el.video;
+    if (video) video.muted = muted;
+  }, [muted]);
 
-  // Expose video ref for snapshot
-  useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current._mseStatus = status;
+  const isLoading = status === 'connecting' || status === 'reconnecting';
+
+  const handleRetry = () => {
+    setStatus('connecting');
+    const el = rtcRef.current;
+    if (el) {
+      try { el.ondisconnect(); } catch {}
+      const streamSrc = cameraId ? `camera_${cameraId}` : cameraUrl;
+      const wsUrl = `${location.origin.replace('http', 'ws')}/go2rtc/api/ws?src=${encodeURIComponent(streamSrc)}`;
+      el.src = wsUrl;
     }
-  }, [status]);
+  };
 
   return (
     <div className={`mse-player ${className || ''}`} style={{ position: 'relative' }}>
-      <video
-        ref={videoRef}
-        autoPlay
-        muted={muted}
-        playsInline
-        style={{ width: '100%', height: '100%', objectFit: 'contain', background: '#000' }}
+      {isLoading && posterUrl && (
+        <img
+          src={posterUrl}
+          alt=""
+          style={{
+            position: 'absolute', top: 0, left: 0,
+            width: '100%', height: '100%',
+            objectFit: 'contain', zIndex: 2, background: '#000',
+          }}
+          onError={() => setPosterUrl(null)}
+        />
+      )}
+
+      <div
+        ref={containerRef}
+        style={{
+          width: '100%', height: '100%',
+          background: '#000',
+          position: 'relative',
+          zIndex: isLoading ? 0 : 3,
+        }}
       />
 
       {status === 'connecting' && (
-        <div className="mse-overlay">
-          <div className="spinner"></div>
-          <span>Connecting to stream...</span>
+        <div style={{
+          position: 'absolute', bottom: 12, left: '50%',
+          transform: 'translateX(-50%)', zIndex: 4,
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'rgba(0,0,0,0.7)', borderRadius: 20,
+          padding: '6px 14px', backdropFilter: 'blur(4px)',
+        }}>
+          <div className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }}></div>
+          <span style={{ fontSize: 12, color: '#fff', opacity: 0.9 }}>Connecting...</span>
         </div>
       )}
 
       {status === 'reconnecting' && (
-        <div className="mse-overlay">
-          <div className="spinner"></div>
-          <span>Reconnecting... (attempt {retryCount.current}/{MAX_RETRIES})</span>
+        <div style={{
+          position: 'absolute', bottom: 12, left: '50%',
+          transform: 'translateX(-50%)', zIndex: 4,
+          display: 'flex', alignItems: 'center', gap: 6,
+          background: 'rgba(0,0,0,0.7)', borderRadius: 20,
+          padding: '6px 14px', backdropFilter: 'blur(4px)',
+        }}>
+          <div className="spinner" style={{ width: 14, height: 14, borderWidth: 2 }}></div>
+          <span style={{ fontSize: 12, color: '#fff', opacity: 0.9 }}>Reconnecting...</span>
         </div>
       )}
 
       {status === 'error' && (
-        <div className="mse-overlay mse-overlay-error">
+        <div className="mse-overlay mse-overlay-error" style={{ zIndex: 4 }}>
           <span>Stream unavailable</span>
           <button
             className="btn btn-sm btn-primary"
-            onClick={() => { retryCount.current = 0; connect(); }}
+            onClick={handleRetry}
             style={{ marginTop: 8 }}
           >
             Retry

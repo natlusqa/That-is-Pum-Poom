@@ -12,6 +12,9 @@ function CameraDiscovery() {
   const [expanding, setExpanding] = useState({});
   const [filter, setFilter] = useState('all');
   const [addingcameras, setAddingCameras] = useState({});
+  const [addingAll, setAddingAll] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanMessage, setScanMessage] = useState('');
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -30,6 +33,8 @@ function CameraDiscovery() {
       const data = await response.json();
       setScanning(data.scanning);
       setResults(data.results || []);
+      setScanProgress(data.progress || 0);
+      setScanMessage(data.message || '');
     } catch (err) {
       console.error('Failed to get discovery status:', err);
     }
@@ -112,6 +117,30 @@ function CameraDiscovery() {
     }
   };
 
+  const addAllCameras = async () => {
+    try {
+      setAddingAll(true);
+      const response = await fetch('/api/camera-discovery/add-all', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (!response.ok) throw new Error('Failed to add cameras');
+
+      const data = await response.json();
+      addToast(`Добавлено ${data.added_count} камер (пропущено дубликатов: ${data.skipped_count})`, 'success');
+      setResults([]);
+    } catch (err) {
+      console.error('Add all cameras error:', err);
+      addToast('Ошибка при добавлении камер', 'error');
+    } finally {
+      setAddingAll(false);
+    }
+  };
+
   const filteredResults = results.filter(r => {
     if (filter === 'rtsp') return r.protocol === 'rtsp';
     if (filter === 'http') return r.protocol === 'http';
@@ -179,6 +208,20 @@ function CameraDiscovery() {
           <div className="discovery-results">
             <div className="results-header">
               <h3>Найдено точек подключения: {filteredResults.length}</h3>
+              {filteredResults.filter(r => r.verified).length > 0 && (
+                <button
+                  onClick={addAllCameras}
+                  disabled={addingAll}
+                  className="btn btn-primary"
+                  style={{ marginBottom: 8 }}
+                >
+                  {addingAll ? (
+                    <><FiLoader className="spin" /> Добавляю...</>
+                  ) : (
+                    <><FiPlus /> Добавить все ({filteredResults.filter(r => r.verified).length})</>
+                  )}
+                </button>
+              )}
               <div className="filter-buttons">
                 <button
                   className={`btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
@@ -257,11 +300,23 @@ function CameraDiscovery() {
           </div>
         )}
 
-        {scanning && results.length === 0 && (
+        {scanning && (
           <div className="scanning-state">
             <div className="spinner"></div>
             <p>Сканирование сети {network}...</p>
-            <small>Это может занять до 1 минуты</small>
+            <div style={{ width: '100%', maxWidth: 400, margin: '12px auto' }}>
+              <div style={{ background: 'var(--bg-tertiary, #333)', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${scanProgress}%`,
+                  height: '100%',
+                  background: 'var(--accent, #4f8cff)',
+                  borderRadius: 6,
+                  transition: 'width 0.3s ease'
+                }} />
+              </div>
+              <small style={{ marginTop: 4, display: 'block' }}>{scanProgress}% — {scanMessage}</small>
+            </div>
+            {results.length > 0 && <small>Уже найдено: {results.filter(r => r.verified).length} камер</small>}
           </div>
         )}
       </div>

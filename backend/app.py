@@ -112,8 +112,7 @@ class Camera(db.Model):
         creds = ""
         if self.username:
             creds = self.username
-            if self.password:
-                creds = f"{creds}:{self.password}"
+            creds = f"{creds}:{self.password or ''}"
             creds = f"{creds}@"
 
         path = self.path or ""
@@ -1025,6 +1024,11 @@ def start_camera_discovery(current_user):
     if discovery_state['scanning']:
         return jsonify({'error': 'Scan already in progress'}), 400
 
+    # Accept user-specified network(s) from request body
+    data = request.get_json(silent=True) or {}
+    user_network = data.get('network', '').strip()
+    user_networks = [user_network] if user_network else None
+
     discovery_state['scanning'] = True
     discovery_state['stage'] = 'starting'
     discovery_state['message'] = 'Initializing auto-discovery...'
@@ -1035,7 +1039,10 @@ def start_camera_discovery(current_user):
     def scan_in_background():
         global _discovery_instance
         try:
-            _discovery_instance = SmartCameraDiscovery(callback=_discovery_callback)
+            _discovery_instance = SmartCameraDiscovery(
+                callback=_discovery_callback,
+                networks=user_networks
+            )
             results = _discovery_instance.discover()
             discovery_state['results'] = results
             logger.info(f"Auto-discovery complete: {len(results)} verified cameras found")
@@ -1107,11 +1114,27 @@ def add_discovered_camera(current_user):
         protocol=data.get('protocol', 'rtsp'),
         path=data.get('path', '/stream'),
         active=True,
-        face_recognition_enabled=False
+        face_recognition_enabled=data.get('face_recognition_enabled', True)
     )
 
     db.session.add(camera)
     db.session.commit()
+
+    # Register stream in go2rtc with H.265->H.264 transcoding for browser MSE
+    stream_url = camera.get_stream_url()
+    if stream_url:
+        try:
+            import requests as http_requests
+            go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+            go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+            base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+            http_requests.put(base, params={'src': stream_url, 'name': f'camera_{camera.id}_raw'}, timeout=5)
+            http_requests.put(base, params={
+                'src': f'ffmpeg:camera_{camera.id}_raw#video=h264',
+                'name': f'camera_{camera.id}'
+            }, timeout=5)
+        except Exception:
+            pass
 
     return jsonify({
         'message': 'Camera added successfully',
@@ -1154,7 +1177,7 @@ def add_all_discovered_cameras(current_user):
             protocol=cam.get('protocol', 'rtsp'),
             path=cam.get('path', '/stream'),
             active=True,
-            face_recognition_enabled=False
+            face_recognition_enabled=True
         )
         db.session.add(camera)
         added.append(cam['ip_address'])
@@ -1630,7 +1653,8 @@ def get_camera_poster(current_user, camera_id):
 
     go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
     go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
-    go2rtc_url = f"http://{go2rtc_host}:{go2rtc_port}/api/frame.jpeg?src={quote(stream_url, safe='')}"
+    # Use raw stream name for poster (no need to transcode a single frame)
+    go2rtc_url = f"http://{go2rtc_host}:{go2rtc_port}/api/frame.jpeg?src=camera_{camera_id}_raw"
 
     try:
         resp = http_requests.get(go2rtc_url, timeout=8)
@@ -1953,6 +1977,22 @@ def internal_worker_cameras():
     } for c in cameras])
 
 
+@app.route('/api/internal/worker/recording-cameras', methods=['GET'])
+def internal_worker_recording_cameras():
+    """Get ALL active cameras for recording (not just face-recognition ones)"""
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cameras = Camera.query.filter_by(active=True).all()
+    return jsonify([{
+        'id': c.id,
+        'name': c.name,
+        'stream_url': c.get_stream_url(),
+    } for c in cameras])
+
+
 @app.route('/api/internal/worker/faces', methods=['GET'])
 def internal_worker_faces():
     """Get all known face embeddings for the worker"""
@@ -2206,6 +2246,41 @@ with app.app_context():
         logger.error(f"Failed to load face recognition model: {e}")
 
     load_face_db_to_memory()
+
+    # Pre-register all active camera streams in go2rtc for instant playback
+    # Camera sends H.265/HEVC which Chrome cannot play via MSE.
+    # Solution: raw RTSP + ffmpeg:raw#video=h264 transcoder for browser playback.
+    def _register_go2rtc_streams():
+        import time
+        time.sleep(3)  # Wait for go2rtc to be ready
+        go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+        go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+        base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+        try:
+            with app.app_context():
+                cameras = Camera.query.filter_by(active=True).all()
+                registered = 0
+                for cam in cameras:
+                    url = cam.get_stream_url()
+                    if url:
+                        try:
+                            import requests as _req
+                            # 1) Raw RTSP source (H.265, for poster/snapshots/worker)
+                            _req.put(base, params={'src': url, 'name': f'camera_{cam.id}_raw'}, timeout=5)
+                            # 2) FFmpeg transcoder: reads from raw H.265, outputs H.264 for browser MSE
+                            _req.put(base, params={
+                                'src': f'ffmpeg:camera_{cam.id}_raw#video=h264',
+                                'name': f'camera_{cam.id}'
+                            }, timeout=5)
+                            registered += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to register camera {cam.id} in go2rtc: {e}")
+                logger.info(f"Pre-registered {registered}/{len(cameras)} camera streams in go2rtc (H.265->H.264)")
+        except Exception as e:
+            logger.error(f"Failed to pre-register go2rtc streams: {e}")
+
+    import threading
+    threading.Thread(target=_register_go2rtc_streams, daemon=True).start()
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('FLASK_PORT', 5002)), debug=False, allow_unsafe_werkzeug=True)

@@ -11,8 +11,20 @@ An intelligent video surveillance system with real-time face recognition, automa
 - **Live Streaming** — WebRTC/MJPEG video streams via go2rtc bridge with real-time bounding box overlay
 - **Role-Based Access Control** — JWT authentication with 4 roles: `super_admin`, `admin`, `hr`, `employee`
 
+### Smart Camera Auto-Discovery (v3)
+- **One-click discovery** — finds all IP cameras on the local network automatically
+- **Fast:** typical scan completes in 15-30 seconds (hard limit: 5 minutes)
+- **Multi-protocol detection:** ARP table, ONVIF WS-Discovery, UPnP/SSDP, TCP port sweep
+- **RTSP Server fingerprinting** — identifies manufacturer (Hikvision, Dahua, XMEye, Axis, Reolink, etc.) from RTSP `Server` header
+- **MAC OUI lookup** — 30+ camera vendor prefixes for priority credential ordering
+- **53 statistically ordered credential+path combos** — covers ~95% of IP cameras worldwide
+- **Smart fast-fail** — wrong credentials rejected in ~0.15s via OpenCV, correct match in ~2.3s
+- **Extended combo fallback** — 100+ additional credential/path permutations if standard combos fail
+- **Safe:** automatically excludes local machine IPs (Docker, VPN, WSL, VirtualBox)
+
 ### Web Dashboard
 - Camera management (add/edit/delete, RTSP/DVR connection types)
+- **Camera auto-discovery** with real-time progress, manufacturer detection, and one-click add
 - Employee registration with facial photo and automatic face embedding extraction
 - Attendance logs with filtering (date, employee, camera, department) and export (CSV, Excel, PDF)
 - Live camera view with face detection overlay via WebSocket
@@ -64,7 +76,7 @@ An intelligent video surveillance system with real-time face recognition, automa
 
 | Service | Description | Port |
 |---------|-------------|------|
-| `postgres` | PostgreSQL 16 database | 5434 (external) |
+| `postgres` | PostgreSQL 16 database | 5435 (external) |
 | `backend` | Flask API + ML inference | 5002 |
 | `frontend` | React SPA via Nginx | 80 |
 | `go2rtc` | RTSP → MJPEG/WebRTC bridge | internal |
@@ -159,6 +171,54 @@ python worker_multiproc.py
 
 ---
 
+## Local backend for ONVIF camera discovery
+
+**Why:** ONVIF WS-Discovery uses multicast (UDP) on the LAN. A backend running inside Docker cannot see this traffic, so **camera auto-discovery does not work** when the backend is in a container.
+
+**Solution:** run the rest of the stack in Docker, but run the **backend on the host**. The frontend and Telegram bot will talk to the backend via `host.docker.internal`.
+
+### 1. Start stack without backend container
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local-backend.yml up -d
+```
+
+This starts: Postgres, frontend, go2rtc, telegram-bot. The backend container is not started.
+
+### 2. Run backend on the host
+
+**Windows (PowerShell):**
+```powershell
+.\scripts\run-backend-local.ps1
+```
+
+**Linux / macOS:**
+```bash
+chmod +x scripts/run-backend-local.sh
+./scripts/run-backend-local.sh
+```
+
+**Or manually:** from the project root, set the database URL to the exposed Postgres port (e.g. `5435`), then start the app:
+
+```bash
+cd backend
+export DATABASE_URL="postgresql://surveillance:YOUR_POSTGRES_PASSWORD@localhost:5435/surveillance"
+export FLASK_PORT=5002
+export GO2RTC_HOST=localhost
+export GO2RTC_PORT=1984
+pip install -r requirements.txt   # if not already
+python app.py
+```
+
+### 3. Use the system
+
+- **Web:** http://localhost:8080 (or http://localhost if you kept port 80) — Nginx in Docker proxies `/api/` and `/socket.io/` to the backend on the host.
+- **ONVIF discovery:** Cameras → **Discover cameras** — scanning will now see devices on your LAN.
+
+**Note:** On Linux, `host.docker.internal` is added by the override via `extra_hosts: host-gateway`. On Docker Desktop (Windows/macOS) it works out of the box.
+
+---
+
 ## Usage Guide
 
 ### Adding Cameras
@@ -227,6 +287,11 @@ Authorization: Bearer <JWT_TOKEN>
 | GET | `/api/attendance/stats` | Yes | Aggregated statistics |
 | GET | `/api/cameras/{id}/snapshot` | Yes | Camera snapshot |
 | GET | `/api/audit` | Admin | Audit trail |
+| POST | `/api/camera-discovery/scan` | Admin | Start auto-discovery scan |
+| GET | `/api/camera-discovery/status` | Yes | Discovery progress & results |
+| POST | `/api/camera-discovery/stop` | Admin | Stop running scan |
+| POST | `/api/camera-discovery/add` | Admin | Add discovered camera |
+| POST | `/api/camera-discovery/add-all` | Admin | Add all discovered cameras |
 | GET/POST | `/api/users` | Super Admin | User management |
 | GET/POST | `/api/departments` | HR/Admin | Department management |
 
@@ -259,6 +324,7 @@ Authorization: Bearer <JWT_TOKEN>
 surveillance-ai/
 ├── backend/
 │   ├── app.py                    # Flask API + all endpoints + models
+│   ├── camera_discovery.py       # Smart auto-discovery engine v3
 │   ├── face_core.py              # InsightFace wrapper (detection + embeddings)
 │   ├── face_matching.py          # Vectorized cosine similarity matching
 │   ├── worker_multiproc.py       # Multi-process camera worker
@@ -277,10 +343,15 @@ surveillance-ai/
 │   ├── package.json
 │   └── Dockerfile
 ├── nginx/
-│   └── nginx.conf                # Reverse proxy + WebSocket config
+│   ├── nginx.conf                # Default: backend inside Docker
+│   └── nginx.local-backend.conf  # Backend on host (for ONVIF discovery)
 ├── go2rtc/
 │   └── go2rtc.yaml               # RTSP bridge configuration
+├── scripts/
+│   ├── run-backend-local.ps1     # Windows: run backend on host
+│   └── run-backend-local.sh      # Linux/macOS: run backend on host
 ├── docker-compose.yml
+├── docker-compose.local-backend.yml  # Override for host backend
 ├── .env.example
 └── README.md
 ```

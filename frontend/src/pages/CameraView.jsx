@@ -35,9 +35,9 @@ const buildCameraUrl = (camera) => {
   if (camera.username) {
     const user = encodeURIComponent(camera.username);
     const pass = camera.password && camera.password !== '****'
-      ? `:${encodeURIComponent(camera.password)}`
+      ? encodeURIComponent(camera.password)
       : '';
-    creds = `${user}${pass}@`;
+    creds = `${user}:${pass}@`;
   }
   return `${protocol}://${creds}${camera.ip_address}${port}${path}`;
 };
@@ -61,7 +61,11 @@ function CameraView() {
   const loadCamera = async () => {
     try {
       const response = await cameraAPI.getById(id);
-      setCamera(response.data);
+      const cam = response.data;
+      setCamera(cam);
+
+      // Pre-warm: trigger go2rtc to start RTSP connection early (read-only, does NOT overwrite stream config)
+      fetch(`/go2rtc/api/frame.jpeg?src=camera_${id}_raw`).catch(() => {});
     } catch (err) {
       console.error('Error loading camera:', err);
       addToast('Failed to load camera', 'error');
@@ -178,6 +182,7 @@ function CameraView() {
               <MSEPlayer
                 key={`mse-${reloadKey}`}
                 cameraUrl={cameraUrl}
+                cameraId={id}
                 muted={muted}
                 onError={handleStreamError}
                 onConnected={handleStreamConnected}

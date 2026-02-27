@@ -1,0 +1,31 @@
+# Override for running BACKEND on the host (required for ONVIF camera discovery).
+# Multicast/broadcast from inside Docker cannot reach the LAN, so discovery must run locally.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.local-backend.yml up -d
+# Then start the backend on the host: see scripts/run-backend-local.ps1 or README.
+#
+# Backend is not started in Docker; frontend and telegram-bot proxy to host.
+
+services:
+  backend:
+    profiles:
+      - docker-backend
+    # When this override is used without --profile docker-backend, backend is not started.
+
+  frontend:
+    volumes:
+      - ./nginx/nginx.local-backend.conf:/etc/nginx/conf.d/default.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - go2rtc
+    # No backend dependency — backend runs on host
+
+  telegram-bot:
+    environment:
+      - API_BASE_URL=http://host.docker.internal:5002
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on: []
+    # Backend runs on host; bot talks to it via host.docker.internal
