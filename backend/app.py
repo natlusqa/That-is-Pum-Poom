@@ -4,6 +4,8 @@ import json
 import base64
 import csv
 import time
+import re
+import socket
 from datetime import datetime, timezone, timedelta
 from functools import wraps
 from io import StringIO, BytesIO
@@ -15,7 +17,7 @@ from flask import Flask, request, jsonify, send_from_directory, send_file, Respo
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from sqlalchemy import func, text
+from sqlalchemy import func, text, inspect
 from werkzeug.security import generate_password_hash, check_password_hash
 from dateutil import parser as date_parser
 from collections import defaultdict, deque
@@ -112,8 +114,7 @@ class Camera(db.Model):
         creds = ""
         if self.username:
             creds = self.username
-            if self.password:
-                creds = f"{creds}:{self.password}"
+            creds = f"{creds}:{self.password or ''}"
             creds = f"{creds}@"
 
         path = self.path or ""
@@ -157,12 +158,24 @@ class Employee(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     employee_id = db.Column(db.String(50), unique=True, nullable=False)
+    phone_number = db.Column(db.String(30))
     position = db.Column(db.String(100))
     department = db.Column(db.String(100), index=True)
     face_encoding = db.Column(db.Text)
     face_encoding_blob = db.Column(db.LargeBinary, nullable=True)
     photo_path = db.Column(db.String(200))
     active = db.Column(db.Boolean, default=True, index=True)
+
+
+class EmployeeSchedule(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    employee_id = db.Column(db.Integer, db.ForeignKey('employee.id'), nullable=False, unique=True, index=True)
+    # Stored in HH:MM format (local workday schedule)
+    planned_check_in = db.Column(db.String(5), nullable=False, default='09:00')
+    planned_check_out = db.Column(db.String(5), nullable=False, default='18:00')
+    updated_at = db.Column(db.DateTime, default=utc_now, onupdate=utc_now)
+
+    employee = db.relationship('Employee', backref='schedule', uselist=False)
 
 
 class Department(db.Model):
@@ -362,6 +375,46 @@ def ensure_department_exists(name):
     return department
 
 
+def ensure_default_admin_super_admin():
+    """Ensure built-in admin account always has super_admin role."""
+    admin_user = User.query.filter_by(username='admin').first()
+    if not admin_user:
+        admin_user = User(username='admin', role='super_admin')
+        admin_user.set_password('admin123')
+        db.session.add(admin_user)
+        db.session.commit()
+        logger.info("Default admin user created as super_admin (admin/admin123)")
+        return admin_user
+
+    changed = False
+    if admin_user.role != 'super_admin':
+        admin_user.role = 'super_admin'
+        changed = True
+    if changed:
+        db.session.commit()
+        logger.info("Default admin role corrected to super_admin")
+    return admin_user
+
+
+def ensure_employee_phone_column():
+    """Add employee.phone_number for old databases without migrations."""
+    try:
+        inspector = inspect(db.engine)
+        columns = {c['name'] for c in inspector.get_columns('employee')}
+        if 'phone_number' in columns:
+            return
+
+        if db.engine.dialect.name == 'sqlite':
+            db.session.execute(text("ALTER TABLE employee ADD COLUMN phone_number VARCHAR(30)"))
+        else:
+            db.session.execute(text("ALTER TABLE employee ADD COLUMN IF NOT EXISTS phone_number VARCHAR(30)"))
+        db.session.commit()
+        logger.info("Database migration applied: employee.phone_number")
+    except Exception as e:
+        db.session.rollback()
+        logger.warning(f"Failed to add employee.phone_number column: {e}")
+
+
 # --- AUTH DECORATORS ---
 
 def _extract_token():
@@ -434,6 +487,60 @@ def _build_attendance_query(args):
             logger.warning(f"Invalid date_to: {date_to}: {e}")
 
     return query
+
+
+def _normalize_hhmm(value, fallback):
+    raw = (value or '').strip()
+    m = re.match(r'^([01]?\d|2[0-3]):([0-5]\d)$', raw)
+    if not m:
+        return fallback
+    return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+
+def _employee_schedule_map(employee_ids):
+    defaults = {}
+    for emp_id in employee_ids:
+        defaults[emp_id] = {
+            'planned_check_in': '09:00',
+            'planned_check_out': '18:00',
+        }
+    if not employee_ids:
+        return defaults
+
+    rows = EmployeeSchedule.query.filter(EmployeeSchedule.employee_id.in_(employee_ids)).all()
+    for row in rows:
+        defaults[row.employee_id] = {
+            'planned_check_in': _normalize_hhmm(row.planned_check_in, '09:00'),
+            'planned_check_out': _normalize_hhmm(row.planned_check_out, '18:00'),
+        }
+    return defaults
+
+
+def _combine_date_hhmm(day_obj, hhmm):
+    h, m = [int(x) for x in hhmm.split(':')]
+    return datetime(day_obj.year, day_obj.month, day_obj.day, h, m, 0)
+
+
+def _validate_hhmm(value, default_value):
+    raw = (value or '').strip()
+    if not raw:
+        return default_value, None
+    m = re.match(r'^([01]?\d|2[0-3]):([0-5]\d)$', raw)
+    if not m:
+        return None, 'Неверный формат времени. Используйте HH:MM'
+    return f"{int(m.group(1)):02d}:{m.group(2)}", None
+
+
+def _attendance_edit_allowed(current_user, log_timestamp):
+    """Only hr/admin/super_admin can edit attendance logs from last 7 days."""
+    if current_user.role not in ('hr', 'admin', 'super_admin'):
+        return False
+    if not log_timestamp:
+        return False
+    ts = log_timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts >= (utc_now() - timedelta(days=7))
 
 
 # --- API ROUTES ---
@@ -578,6 +685,8 @@ def login():
     if not data:
         return jsonify({'error': 'Invalid request'}), 400
     username = (data.get('username') or '').strip()
+    if username == 'admin':
+        ensure_default_admin_super_admin()
     user = User.query.filter_by(username=username).first()
     if user and user.check_password(data.get('password', '')):
         token = jwt.encode({
@@ -718,6 +827,9 @@ def add_employee(current_user):
     full_name = request.form.get('name')
     department = request.form.get('department', '').strip()
     position = request.form.get('position')
+    phone_number = (request.form.get('phone_number') or '').strip()
+    planned_check_in = request.form.get('planned_check_in')
+    planned_check_out = request.form.get('planned_check_out')
 
     file_bytes = None
     if 'photo' in request.files:
@@ -728,6 +840,9 @@ def add_employee(current_user):
             full_name = request.json.get('name')
             department = (request.json.get('department') or '').strip()
             position = request.json.get('position')
+            phone_number = (request.json.get('phone_number') or '').strip()
+            planned_check_in = request.json.get('planned_check_in')
+            planned_check_out = request.json.get('planned_check_out')
         except Exception as e:
             logger.warning(f"Failed to parse base64 photo: {e}")
 
@@ -736,6 +851,13 @@ def add_employee(current_user):
 
     if not department:
         return jsonify({'error': 'Укажите отдел сотрудника'}), 400
+
+    planned_check_in, err_in = _validate_hhmm(planned_check_in, '09:00')
+    if err_in:
+        return jsonify({'error': f'Плановый приход: {err_in}'}), 400
+    planned_check_out, err_out = _validate_hhmm(planned_check_out, '18:00')
+    if err_out:
+        return jsonify({'error': f'Плановый уход: {err_out}'}), 400
 
     department_obj = ensure_department_exists(department)
     db.session.flush()
@@ -778,6 +900,7 @@ def add_employee(current_user):
     employee = Employee(
         name=full_name,
         employee_id=emp_id,
+        phone_number=phone_number,
         department=department,
         position=position,
         face_encoding=vector_json,
@@ -786,6 +909,13 @@ def add_employee(current_user):
         active=True
     )
     db.session.add(employee)
+    db.session.flush()
+    schedule = EmployeeSchedule(
+        employee_id=employee.id,
+        planned_check_in=planned_check_in,
+        planned_check_out=planned_check_out
+    )
+    db.session.add(schedule)
     db.session.commit()
 
     load_face_db_to_memory()
@@ -803,14 +933,18 @@ def get_employees(current_user):
     if not include_inactive:
         query = query.filter_by(active=True)
     employees = query.all()
+    schedule_map = _employee_schedule_map([e.id for e in employees])
     return jsonify([{
         'id': e.id,
         'name': e.name,
         'employee_id': e.employee_id,
+        'phone_number': e.phone_number,
         'department': e.department,
         'position': e.position,
         'photo_path': e.photo_path,
-        'active': e.active
+        'active': e.active,
+        'planned_check_in': schedule_map.get(e.id, {}).get('planned_check_in', '09:00'),
+        'planned_check_out': schedule_map.get(e.id, {}).get('planned_check_out', '18:00')
     } for e in employees])
 
 
@@ -818,14 +952,18 @@ def get_employees(current_user):
 @token_required
 def get_employee(current_user, emp_id):
     employee = Employee.query.get_or_404(emp_id)
+    schedule = EmployeeSchedule.query.filter_by(employee_id=employee.id).first()
     return jsonify({
         'id': employee.id,
         'name': employee.name,
         'employee_id': employee.employee_id,
+        'phone_number': employee.phone_number,
         'department': employee.department,
         'position': employee.position,
         'photo_path': employee.photo_path,
-        'active': employee.active
+        'active': employee.active,
+        'planned_check_in': _normalize_hhmm(schedule.planned_check_in if schedule else None, '09:00'),
+        'planned_check_out': _normalize_hhmm(schedule.planned_check_out if schedule else None, '18:00')
     })
 
 
@@ -856,8 +994,34 @@ def update_employee(current_user, emp_id):
         ensure_department_exists(employee.department)
     if 'position' in data:
         employee.position = data['position']
+    if 'phone_number' in data:
+        employee.phone_number = (data.get('phone_number') or '').strip()
     if 'active' in data:
         employee.active = data['active']
+
+    schedule = EmployeeSchedule.query.filter_by(employee_id=employee.id).first()
+    schedule_in = data.get('planned_check_in')
+    schedule_out = data.get('planned_check_out')
+    if ('planned_check_in' in data) or ('planned_check_out' in data):
+        default_in = _normalize_hhmm(schedule.planned_check_in if schedule else None, '09:00')
+        default_out = _normalize_hhmm(schedule.planned_check_out if schedule else None, '18:00')
+        normalized_in, err_in = _validate_hhmm(schedule_in if 'planned_check_in' in data else default_in, default_in)
+        if err_in:
+            return jsonify({'error': f'Плановый приход: {err_in}'}), 400
+        normalized_out, err_out = _validate_hhmm(schedule_out if 'planned_check_out' in data else default_out, default_out)
+        if err_out:
+            return jsonify({'error': f'Плановый уход: {err_out}'}), 400
+
+        if schedule is None:
+            schedule = EmployeeSchedule(
+                employee_id=employee.id,
+                planned_check_in=normalized_in,
+                planned_check_out=normalized_out
+            )
+            db.session.add(schedule)
+        else:
+            schedule.planned_check_in = normalized_in
+            schedule.planned_check_out = normalized_out
 
     db.session.commit()
     load_face_db_to_memory()
@@ -941,6 +1105,23 @@ def add_camera(current_user):
 
     db.session.add(camera)
     db.session.commit()
+
+    # Register stream in go2rtc
+    stream_url = camera.get_stream_url()
+    if stream_url:
+        try:
+            import requests as http_requests
+            go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+            go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+            base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+            http_requests.put(base, params={'src': stream_url, 'name': f'camera_{camera.id}_raw'}, timeout=5)
+            http_requests.put(base, params={
+                'src': f'ffmpeg:camera_{camera.id}_raw#video=h264',
+                'name': f'camera_{camera.id}'
+            }, timeout=5)
+        except Exception:
+            pass
+
     return jsonify({'message': 'Camera created', 'id': camera.id}), 201
 
 
@@ -1015,6 +1196,29 @@ def _discovery_callback(stage, message, progress):
     discovery_state['progress'] = progress
 
 
+def _normalize_stream_path(path_value):
+    path = (path_value or '/stream').strip()
+    return path if path.startswith('/') else f'/{path}'
+
+
+def _find_existing_camera(ip_address, port, protocol, path):
+    return Camera.query.filter_by(
+        ip_address=ip_address,
+        port=port,
+        protocol=(protocol or 'rtsp'),
+        path=_normalize_stream_path(path),
+    ).first()
+
+
+def _next_cam_name():
+    max_num = 0
+    for (name,) in db.session.query(Camera.name).all():
+        m = re.match(r'^\s*cam\s+(\d+)\s*$', (name or ''), re.IGNORECASE)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    return f"Cam {max_num + 1}"
+
+
 @app.route('/api/camera-discovery/scan', methods=['POST'])
 @token_required
 @role_required('admin', 'super_admin')
@@ -1024,6 +1228,16 @@ def start_camera_discovery(current_user):
 
     if discovery_state['scanning']:
         return jsonify({'error': 'Scan already in progress'}), 400
+
+    # Accept user-specified network(s) from request body.
+    # Supports single CIDR or list separated by comma/semicolon/space.
+    data = request.get_json(silent=True) or {}
+    user_network = data.get('network', '').strip()
+    user_networks = None
+    if user_network:
+        raw_parts = re.split(r'[,\s;]+', user_network)
+        parts = [p.strip() for p in raw_parts if p.strip()]
+        user_networks = parts or None
 
     discovery_state['scanning'] = True
     discovery_state['stage'] = 'starting'
@@ -1035,10 +1249,13 @@ def start_camera_discovery(current_user):
     def scan_in_background():
         global _discovery_instance
         try:
-            _discovery_instance = SmartCameraDiscovery(callback=_discovery_callback)
+            _discovery_instance = SmartCameraDiscovery(
+                callback=_discovery_callback,
+                networks=user_networks
+            )
             results = _discovery_instance.discover()
             discovery_state['results'] = results
-            logger.info(f"Auto-discovery complete: {len(results)} verified cameras found")
+            logger.info(f"Auto-discovery complete: {len(results)} results found")
         except Exception as e:
             logger.error(f"Auto-discovery failed: {e}")
             discovery_state['error'] = str(e)
@@ -1087,31 +1304,55 @@ def get_discovery_status(current_user):
 def add_discovered_camera(current_user):
     """Add a single discovered camera to the system."""
     data = request.get_json()
+    protocol = data.get('protocol', 'rtsp')
+    path = _normalize_stream_path(data.get('path', '/stream'))
 
-    # Check for duplicate by IP + port
-    existing = Camera.query.filter_by(
-        ip_address=data.get('ip_address'),
-        port=data.get('port', 554)
-    ).first()
+    # Check duplicate by IP + port + protocol + path
+    existing = _find_existing_camera(
+        data.get('ip_address'),
+        data.get('port', 554),
+        protocol,
+        path,
+    )
     if existing:
         return jsonify({'error': 'Camera already exists', 'id': existing.id}), 409
 
+    desired_name = (data.get('name') or '').strip()
+    if (not desired_name) or desired_name.lower().startswith('camera '):
+        desired_name = _next_cam_name()
+
     camera = Camera(
-        name=data.get('name', f"Camera {data.get('ip_address')}"),
+        name=desired_name,
         connection_type=data.get('connection_type', 'direct'),
         location=data.get('location', ''),
         ip_address=data.get('ip_address'),
         port=data.get('port', 554),
         username=data.get('username', ''),
         password=data.get('password', ''),
-        protocol=data.get('protocol', 'rtsp'),
-        path=data.get('path', '/stream'),
+        protocol=protocol,
+        path=path,
         active=True,
-        face_recognition_enabled=False
+        face_recognition_enabled=data.get('face_recognition_enabled', True)
     )
 
     db.session.add(camera)
     db.session.commit()
+
+    # Register stream in go2rtc with H.265->H.264 transcoding for browser MSE
+    stream_url = camera.get_stream_url()
+    if stream_url:
+        try:
+            import requests as http_requests
+            go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+            go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+            base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+            http_requests.put(base, params={'src': stream_url, 'name': f'camera_{camera.id}_raw'}, timeout=5)
+            http_requests.put(base, params={
+                'src': f'ffmpeg:camera_{camera.id}_raw#video=h264',
+                'name': f'camera_{camera.id}'
+            }, timeout=5)
+        except Exception:
+            pass
 
     return jsonify({
         'message': 'Camera added successfully',
@@ -1124,48 +1365,126 @@ def add_discovered_camera(current_user):
 @token_required
 @role_required('admin', 'super_admin')
 def add_all_discovered_cameras(current_user):
-    """Add ALL verified discovered cameras to the system at once."""
-    results = discovery_state.get('results', [])
-    verified = [r for r in results if r.get('verified')]
+    """Add discovered cameras; can also include auth-required cameras with shared creds."""
+    data = request.get_json(silent=True) or {}
+    include_auth_required = bool(data.get('include_auth_required', False))
+    shared_username = (data.get('username') or '').strip()
+    shared_password = data.get('password') or ''
 
-    if not verified:
-        return jsonify({'error': 'No verified cameras to add'}), 400
+    def _apply_creds(path_value, username_value, password_value):
+        path = path_value or '/stream'
+        if '{user}' in path or '{pass}' in path:
+            return path.replace('{user}', username_value).replace('{pass}', password_value)
+        if 'user=' in path and 'password=' in path:
+            import re
+            path = re.sub(r'user=[^&/]*', f'user={username_value}', path)
+            path = re.sub(r'password=[^&/]*', f'password={password_value}', path)
+            return path
+        return path
+
+    results = discovery_state.get('results', [])
+    to_add = []
+    for cam in results:
+        if cam.get('verified'):
+            to_add.append(cam)
+            continue
+        if cam.get('auth_required') and include_auth_required and shared_username:
+            to_add.append(cam)
+
+    if not to_add:
+        return jsonify({'error': 'No discovered cameras to add'}), 400
 
     added = []
+    updated = []
+    added_ids = []
+    updated_ids = []
     skipped = []
 
-    for cam in verified:
-        existing = Camera.query.filter_by(
-            ip_address=cam['ip_address'],
-            port=cam['port']
-        ).first()
+    for cam in to_add:
+        username = cam.get('username', '') or ''
+        password = cam.get('password', '') or ''
+        path = cam.get('path', '/stream') or '/stream'
+        protocol = cam.get('protocol', 'rtsp')
+        if cam.get('auth_required') and not cam.get('verified'):
+            username = shared_username
+            password = shared_password
+            path = _apply_creds(path, username, password)
+        path = _normalize_stream_path(path)
+
+        existing = _find_existing_camera(
+            cam['ip_address'],
+            cam['port'],
+            protocol,
+            path,
+        )
         if existing:
-            skipped.append(cam['ip_address'])
+            requested_name = (cam.get('name') or '').strip()
+            if requested_name and not requested_name.lower().startswith('camera '):
+                existing.name = requested_name
+            existing.connection_type = cam.get('connection_type', 'direct')
+            existing.location = existing.location or ''
+            existing.username = username
+            existing.password = password
+            existing.protocol = protocol
+            existing.path = path
+            existing.active = True
+            updated.append(f"{cam['ip_address']}:{cam['port']}{path}")
+            updated_ids.append(existing.id)
             continue
 
+        requested_name = (cam.get('name') or '').strip()
+        if (not requested_name) or requested_name.lower().startswith('camera '):
+            requested_name = _next_cam_name()
+
         camera = Camera(
-            name=cam.get('name', f"Camera {cam['ip_address']}"),
+            name=requested_name,
             connection_type=cam.get('connection_type', 'direct'),
             location='',
             ip_address=cam['ip_address'],
             port=cam['port'],
-            username=cam.get('username', ''),
-            password=cam.get('password', ''),
-            protocol=cam.get('protocol', 'rtsp'),
-            path=cam.get('path', '/stream'),
+            username=username,
+            password=password,
+            protocol=protocol,
+            path=path,
             active=True,
-            face_recognition_enabled=False
+            face_recognition_enabled=True
         )
         db.session.add(camera)
-        added.append(cam['ip_address'])
+        db.session.flush()
+        added.append(f"{cam['ip_address']}:{cam['port']}{path}")
+        added_ids.append(camera.id)
 
     db.session.commit()
 
+    # Register all newly added cameras in go2rtc
+    try:
+        import requests as http_requests
+        go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+        go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+        base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+        for cam_id in (added_ids + updated_ids):
+            cam_obj = Camera.query.get(cam_id)
+            if cam_obj:
+                stream_url = cam_obj.get_stream_url()
+                if stream_url:
+                    try:
+                        http_requests.put(base, params={'src': stream_url, 'name': f'camera_{cam_obj.id}_raw'}, timeout=5)
+                        http_requests.put(base, params={
+                            'src': f'ffmpeg:camera_{cam_obj.id}_raw#video=h264',
+                            'name': f'camera_{cam_obj.id}'
+                        }, timeout=5)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
     return jsonify({
-        'message': f'Added {len(added)} cameras, skipped {len(skipped)} duplicates',
+        'message': f'Added {len(added)} cameras, updated {len(updated)}, skipped {len(skipped)}',
         'added_count': len(added),
+        'updated_count': len(updated),
         'skipped_count': len(skipped),
-        'added_ips': added,
+        'added_streams': added,
+        'updated_streams': updated,
         'skipped_ips': skipped,
     }), 201
 
@@ -1184,6 +1503,39 @@ def get_attendance_logs(current_user):
         page=page, per_page=per_page, error_out=False
     )
 
+    page_logs = pagination.items
+    employee_ids = {log.employee_id for log in page_logs if log.employee_id}
+    schedule_map = _employee_schedule_map(employee_ids)
+
+    # Build per-day first/last seen times directly from face-recognition logs.
+    first_last = {}
+    if employee_ids and page_logs:
+        day_values = [log.timestamp.date() for log in page_logs if log.timestamp]
+        if day_values:
+            min_day = min(day_values)
+            max_day = max(day_values)
+            range_start = datetime(min_day.year, min_day.month, min_day.day, 0, 0, 0)
+            range_end = datetime(max_day.year, max_day.month, max_day.day, 23, 59, 59)
+            related = AttendanceLog.query.filter(
+                AttendanceLog.employee_id.in_(employee_ids),
+                AttendanceLog.timestamp >= range_start,
+                AttendanceLog.timestamp <= range_end
+            ).all()
+            for r in related:
+                if not r.timestamp:
+                    continue
+                key = (r.employee_id, r.timestamp.date().isoformat())
+                cur = first_last.get(key)
+                if not cur:
+                    first_last[key] = {'first': r.timestamp, 'last': r.timestamp}
+                else:
+                    if r.timestamp < cur['first']:
+                        cur['first'] = r.timestamp
+                    if r.timestamp > cur['last']:
+                        cur['last'] = r.timestamp
+
+    grace_minutes = 10
+
     return jsonify({
         'items': [{
             'id': log.id,
@@ -1194,13 +1546,108 @@ def get_attendance_logs(current_user):
             'camera_name': log.camera.name if log.camera else 'Unknown',
             'event_type': log.event_type,
             'timestamp': log.timestamp.isoformat() if log.timestamp else None,
-            'confidence': log.confidence
-        } for log in pagination.items],
+            'confidence': log.confidence,
+            'schedule_check_in': (
+                schedule_map.get(log.employee_id, {}).get('planned_check_in', '09:00')
+                if log.employee_id else '09:00'
+            ),
+            'schedule_check_out': (
+                schedule_map.get(log.employee_id, {}).get('planned_check_out', '18:00')
+                if log.employee_id else '18:00'
+            ),
+            'first_seen_today': (
+                first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('first').isoformat()
+                if (log.employee_id and log.timestamp and first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('first'))
+                else None
+            ),
+            'last_seen_today': (
+                first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('last').isoformat()
+                if (log.employee_id and log.timestamp and first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('last'))
+                else None
+            ),
+            'arrival_status': (
+                (
+                    'on_time'
+                    if first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('first') <=
+                    (_combine_date_hhmm(
+                        log.timestamp.date(),
+                        schedule_map.get(log.employee_id, {}).get('planned_check_in', '09:00')
+                    ) + timedelta(minutes=grace_minutes))
+                    else 'late'
+                )
+                if (log.employee_id and log.timestamp and first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('first'))
+                else 'absent'
+            ),
+            'departure_status': (
+                (
+                    'on_time'
+                    if first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('last') >=
+                    (_combine_date_hhmm(
+                        log.timestamp.date(),
+                        schedule_map.get(log.employee_id, {}).get('planned_check_out', '18:00')
+                    ) - timedelta(minutes=grace_minutes))
+                    else 'left_early'
+                )
+                if (log.employee_id and log.timestamp and first_last.get((log.employee_id, log.timestamp.date().isoformat()), {}).get('last'))
+                else 'absent'
+            ),
+            'can_edit': _attendance_edit_allowed(current_user, log.timestamp)
+        } for log in page_logs],
         'total': pagination.total,
         'pages': pagination.pages,
         'page': pagination.page,
         'per_page': per_page
     })
+
+
+@app.route('/api/attendance/<int:log_id>', methods=['PUT'])
+@token_required
+@role_required('hr', 'admin', 'super_admin')
+def update_attendance_log(current_user, log_id):
+    """Edit attendance log fields for recent records (last 7 days)."""
+    log = AttendanceLog.query.get_or_404(log_id)
+    if not _attendance_edit_allowed(current_user, log.timestamp):
+        return jsonify({'error': 'Редактирование разрешено только для записей за последние 7 дней'}), 403
+
+    data = request.get_json(silent=True) or {}
+
+    if 'event_type' in data:
+        event_type = (data.get('event_type') or '').strip()
+        if event_type not in ('check-in', 'check-out'):
+            return jsonify({'error': "event_type должен быть 'check-in' или 'check-out'"}), 400
+        log.event_type = event_type
+
+    if 'timestamp' in data:
+        try:
+            parsed_ts = date_parser.parse(data.get('timestamp'))
+            log.timestamp = parsed_ts
+        except Exception:
+            return jsonify({'error': 'Некорректный timestamp'}), 400
+
+    if 'confidence' in data:
+        conf = data.get('confidence')
+        if conf is None or conf == '':
+            log.confidence = None
+        else:
+            try:
+                conf_val = float(conf)
+            except Exception:
+                return jsonify({'error': 'confidence должен быть числом'}), 400
+            if conf_val < 0 or conf_val > 1:
+                return jsonify({'error': 'confidence должен быть в диапазоне 0..1'}), 400
+            log.confidence = conf_val
+
+    db.session.commit()
+    log_audit(
+        'attendance_updated',
+        'attendance',
+        log.id,
+        f"Attendance log updated by {current_user.username}",
+        user_id=current_user.id,
+        username=current_user.username
+    )
+
+    return jsonify({'message': 'Запись посещаемости обновлена'})
 
 
 @app.route('/api/attendance/export', methods=['GET'])
@@ -1615,36 +2062,57 @@ def get_saved_snapshot(current_user, filename):
     return send_from_directory(app.config['SNAPSHOTS_FOLDER'], safe_name)
 
 
-@app.route('/api/cameras/<int:camera_id>/poster', methods=['GET'])
-@token_required
-def get_camera_poster(current_user, camera_id):
-    """Fast poster frame via go2rtc (uses cached stream when available)."""
-    import requests as http_requests
-    camera = Camera.query.get_or_404(camera_id)
-    if not camera.active:
-        return jsonify({'error': 'Camera is inactive'}), 404
+POSTER_TTL_SECONDS = 40 * 60
 
+
+def _camera_is_reachable(camera, timeout=2.0):
+    """TCP reachability check used as a lightweight ping for camera host."""
+    if not camera or not camera.ip_address:
+        return False
+    port = int(camera.port or 554)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex((camera.ip_address, port)) == 0
+    except Exception:
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _poster_cache_path(camera_id):
+    return os.path.join(app.config['SNAPSHOTS_FOLDER'], f"camera_{camera_id}_poster.jpg")
+
+
+def _refresh_camera_poster(camera):
+    """Try to capture poster from go2rtc/OpenCV and save to cache file."""
+    import requests as http_requests
+    import cv2
+
+    camera_id = camera.id
     stream_url = camera.get_stream_url()
     if not stream_url:
-        return jsonify({'error': 'No stream URL'}), 400
+        return False
 
+    poster_path = _poster_cache_path(camera_id)
     go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
     go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
-    go2rtc_url = f"http://{go2rtc_host}:{go2rtc_port}/api/frame.jpeg?src={quote(stream_url, safe='')}"
+    go2rtc_url = f"http://{go2rtc_host}:{go2rtc_port}/api/frame.jpeg?src=camera_{camera_id}_raw"
 
+    # 1) Try go2rtc frame API first
     try:
         resp = http_requests.get(go2rtc_url, timeout=8)
         if resp.status_code == 200 and resp.content:
-            return Response(
-                resp.content,
-                mimetype='image/jpeg',
-                headers={'Cache-Control': 'no-cache, max-age=0'}
-            )
+            with open(poster_path, 'wb') as f:
+                f.write(resp.content)
+            return True
     except Exception as e:
-        logger.debug(f"go2rtc poster failed for camera {camera_id}: {e}")
+        logger.debug(f"go2rtc poster refresh failed for camera {camera_id}: {e}")
 
-    # Fallback: capture via OpenCV
-    import cv2
+    # 2) Fallback to OpenCV
     try:
         cap = cv2.VideoCapture(stream_url)
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000)
@@ -1652,13 +2120,48 @@ def get_camera_poster(current_user, camera_id):
             ret, frame = cap.read()
             cap.release()
             if ret and frame is not None:
-                _, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
-                return Response(buf.tobytes(), mimetype='image/jpeg',
-                                headers={'Cache-Control': 'no-cache, max-age=0'})
+                ok, buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+                if ok and buf is not None:
+                    with open(poster_path, 'wb') as f:
+                        f.write(buf.tobytes())
+                    return True
         else:
             cap.release()
     except Exception as e:
-        logger.debug(f"OpenCV poster failed for camera {camera_id}: {e}")
+        logger.debug(f"OpenCV poster refresh failed for camera {camera_id}: {e}")
+
+    return False
+
+
+def _poster_is_fresh(poster_path, ttl_seconds=POSTER_TTL_SECONDS):
+    try:
+        return os.path.exists(poster_path) and (time.time() - os.path.getmtime(poster_path)) < ttl_seconds
+    except Exception:
+        return False
+
+
+@app.route('/api/cameras/<int:camera_id>/poster', methods=['GET'])
+@token_required
+def get_camera_poster(current_user, camera_id):
+    """Poster frame cached on server for 40 minutes per camera."""
+    camera = Camera.query.get_or_404(camera_id)
+    if not camera.active:
+        return jsonify({'error': 'Camera is inactive'}), 404
+
+    poster_path = _poster_cache_path(camera_id)
+    if _poster_is_fresh(poster_path):
+        resp = send_file(poster_path, mimetype='image/jpeg')
+        resp.headers['Cache-Control'] = f'private, max-age={POSTER_TTL_SECONDS}'
+        return resp
+
+    # Try refresh regardless of direct socket reachability:
+    # camera may be reachable via go2rtc even when backend can't open raw socket.
+    _refresh_camera_poster(camera)
+
+    if os.path.exists(poster_path):
+        resp = send_file(poster_path, mimetype='image/jpeg')
+        resp.headers['Cache-Control'] = f'private, max-age={POSTER_TTL_SECONDS}'
+        return resp
 
     return jsonify({'error': 'Unable to capture poster frame'}), 503
 
@@ -1679,11 +2182,9 @@ def get_camera_last_frame(current_user, camera_id):
         thumb_name = os.path.basename(latest_rec.thumbnail_path)
         thumb_full_path = os.path.join(app.config['RECORDINGS_FOLDER'], thumb_name)
         if os.path.exists(thumb_full_path):
-            return send_file(
-                thumb_full_path,
-                mimetype='image/jpeg',
-                headers={'Cache-Control': 'no-cache, max-age=0'}
-            )
+            resp = send_file(thumb_full_path, mimetype='image/jpeg')
+            resp.headers['Cache-Control'] = 'no-cache, max-age=0'
+            return resp
 
     # 2) Latest saved camera snapshot from disk
     snapshots_folder = app.config['SNAPSHOTS_FOLDER']
@@ -1699,11 +2200,9 @@ def get_camera_last_frame(current_user, camera_id):
 
         if candidates:
             latest_path = max(candidates, key=os.path.getmtime)
-            return send_file(
-                latest_path,
-                mimetype='image/jpeg',
-                headers={'Cache-Control': 'no-cache, max-age=0'}
-            )
+            resp = send_file(latest_path, mimetype='image/jpeg')
+            resp.headers['Cache-Control'] = 'no-cache, max-age=0'
+            return resp
     except Exception as e:
         logger.debug(f"Failed to read snapshots for camera {camera_id}: {e}")
 
@@ -1953,6 +2452,22 @@ def internal_worker_cameras():
     } for c in cameras])
 
 
+@app.route('/api/internal/worker/recording-cameras', methods=['GET'])
+def internal_worker_recording_cameras():
+    """Get ALL active cameras for recording (not just face-recognition ones)"""
+    internal_key = request.headers.get('X-Internal-Key', '')
+    expected_key = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
+    if internal_key != expected_key:
+        return jsonify({'error': 'Unauthorized'}), 401
+
+    cameras = Camera.query.filter_by(active=True).all()
+    return jsonify([{
+        'id': c.id,
+        'name': c.name,
+        'stream_url': c.get_stream_url(),
+    } for c in cameras])
+
+
 @app.route('/api/internal/worker/faces', methods=['GET'])
 def internal_worker_faces():
     """Get all known face embeddings for the worker"""
@@ -1985,25 +2500,71 @@ def internal_worker_attendance():
     if not data:
         return jsonify({'error': 'No data'}), 400
 
-    # Support batch logging
+    # Support batch logging; process robustly entry-by-entry so one bad row doesn't kill the batch.
     entries = data if isinstance(data, list) else [data]
     logged = 0
+    skipped = 0
+
     for entry in entries:
         try:
+            employee_id = int(entry.get('employee_id'))
+            camera_id = int(entry.get('camera_id'))
+        except Exception:
+            skipped += 1
+            logger.warning(f"Skip attendance entry with invalid IDs: {entry}")
+            continue
+
+        # Validate FK targets to avoid transaction-wide rollback on commit.
+        if not Employee.query.get(employee_id):
+            skipped += 1
+            logger.warning(f"Skip attendance entry: unknown employee_id={employee_id}")
+            continue
+        if not Camera.query.get(camera_id):
+            skipped += 1
+            logger.warning(f"Skip attendance entry: unknown camera_id={camera_id}")
+            continue
+
+        ts_raw = entry.get('timestamp')
+        try:
+            if ts_raw:
+                ts = date_parser.parse(ts_raw)
+                # DB column is DateTime without timezone; normalize to naive UTC.
+                if ts.tzinfo is not None:
+                    ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+            else:
+                ts = utc_now().replace(tzinfo=None)
+        except Exception:
+            skipped += 1
+            logger.warning(f"Skip attendance entry with invalid timestamp: {ts_raw}")
+            continue
+
+        event_type = (entry.get('event_type') or 'check-in').strip()
+        if event_type not in ('check-in', 'check-out'):
+            event_type = 'check-in'
+
+        try:
+            confidence = entry.get('confidence')
+            confidence = float(confidence) if confidence is not None else None
+        except Exception:
+            confidence = None
+
+        try:
             log = AttendanceLog(
-                employee_id=entry['employee_id'],
-                camera_id=entry['camera_id'],
-                timestamp=datetime.fromisoformat(entry['timestamp']) if entry.get('timestamp') else utc_now(),
-                confidence=entry.get('confidence'),
-                event_type=entry.get('event_type', 'check-in')
+                employee_id=employee_id,
+                camera_id=camera_id,
+                timestamp=ts,
+                confidence=confidence,
+                event_type=event_type
             )
             db.session.add(log)
+            db.session.commit()
             logged += 1
         except Exception as e:
-            logger.error(f"Failed to log attendance entry: {e}")
+            db.session.rollback()
+            skipped += 1
+            logger.error(f"Failed to commit attendance entry: {e}")
 
-    db.session.commit()
-    return jsonify({'logged': logged})
+    return jsonify({'logged': logged, 'skipped': skipped})
 
 
 @app.route('/api/internal/worker/recording', methods=['POST'])
@@ -2165,6 +2726,7 @@ def get_login_audit_logs(current_user):
 with app.app_context():
     os.makedirs(os.path.join(BASE_DIR, 'instance'), exist_ok=True)
     db.create_all()
+    ensure_employee_phone_column()
 
     # Seed departments from already existing employees (for old databases)
     existing_departments = db.session.query(Employee.department).distinct().all()
@@ -2192,12 +2754,7 @@ with app.app_context():
         db.session.commit()
         logger.info(f"Migrated {migrated} face encodings to binary format")
 
-    if not User.query.filter_by(username='admin').first():
-        u = User(username='admin', role='admin')
-        u.set_password('admin123')
-        db.session.add(u)
-        db.session.commit()
-        logger.info("Admin user created (admin/admin123)")
+    ensure_default_admin_super_admin()
 
     try:
         face_engine.load()
@@ -2206,6 +2763,68 @@ with app.app_context():
         logger.error(f"Failed to load face recognition model: {e}")
 
     load_face_db_to_memory()
+
+    # Pre-register all active camera streams in go2rtc for instant playback
+    # Camera sends H.265/HEVC which Chrome cannot play via MSE.
+    # Solution: raw RTSP + ffmpeg:raw#video=h264 transcoder for browser playback.
+    def _register_go2rtc_streams():
+        import time
+        time.sleep(3)  # Wait for go2rtc to be ready
+        go2rtc_host = os.environ.get('GO2RTC_HOST', 'localhost')
+        go2rtc_port = os.environ.get('GO2RTC_PORT', '1984')
+        base = f"http://{go2rtc_host}:{go2rtc_port}/api/streams"
+        try:
+            with app.app_context():
+                cameras = Camera.query.filter_by(active=True).all()
+                registered = 0
+                for cam in cameras:
+                    url = cam.get_stream_url()
+                    if url:
+                        try:
+                            import requests as _req
+                            # 1) Raw RTSP source (H.265, for poster/snapshots/worker)
+                            _req.put(base, params={'src': url, 'name': f'camera_{cam.id}_raw'}, timeout=5)
+                            # 2) FFmpeg transcoder: reads from raw H.265, outputs H.264 for browser MSE
+                            _req.put(base, params={
+                                'src': f'ffmpeg:camera_{cam.id}_raw#video=h264',
+                                'name': f'camera_{cam.id}'
+                            }, timeout=5)
+                            registered += 1
+                        except Exception as e:
+                            logger.debug(f"Failed to register camera {cam.id} in go2rtc: {e}")
+                logger.info(f"Pre-registered {registered}/{len(cameras)} camera streams in go2rtc (H.265->H.264)")
+        except Exception as e:
+            logger.error(f"Failed to pre-register go2rtc streams: {e}")
+
+    import threading
+    threading.Thread(target=_register_go2rtc_streams, daemon=True).start()
+
+    def _poster_refresh_loop():
+        # Initial small delay to allow services/network to settle
+        time.sleep(8)
+        while True:
+            try:
+                with app.app_context():
+                    cameras = Camera.query.filter_by(active=True).all()
+                    refreshed = 0
+                    for cam in cameras:
+                        try:
+                            # Ping-like reachability check for logs/diagnostics only (must not block refresh)
+                            reachable = _camera_is_reachable(cam)
+                            if _refresh_camera_poster(cam):
+                                refreshed += 1
+                            elif not reachable:
+                                logger.debug(f"Camera {cam.id} not reachable by socket ping, poster unchanged")
+                        except Exception as e:
+                            logger.debug(f"Poster refresh skipped for camera {cam.id}: {e}")
+                    logger.info(f"Poster refresh cycle done: {refreshed}/{len(cameras)} updated")
+            except Exception as e:
+                logger.warning(f"Poster refresh cycle error: {e}")
+
+            # Update cadence requested by UI: once every 40 minutes
+            time.sleep(POSTER_TTL_SECONDS)
+
+    threading.Thread(target=_poster_refresh_loop, daemon=True).start()
 
 if __name__ == '__main__':
     socketio.run(app, host='0.0.0.0', port=int(os.environ.get('FLASK_PORT', 5002)), debug=False, allow_unsafe_werkzeug=True)

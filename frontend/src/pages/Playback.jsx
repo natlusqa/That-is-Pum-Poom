@@ -20,6 +20,7 @@ function Playback() {
     if (type === 'face') return 'Распознавание лица';
     if (type === 'motion') return 'Движение';
     if (type === 'manual') return 'Вручную';
+    if (type === 'continuous') return 'Непрерывная запись';
     return type;
   };
 
@@ -242,6 +243,7 @@ function Playback() {
                     style={{
                       background: rec.event_type === 'face' ? 'var(--danger)'
                         : rec.event_type === 'motion' ? 'var(--info)'
+                        : rec.event_type === 'continuous' ? 'var(--primary)'
                         : 'var(--success)'
                     }}
                   />

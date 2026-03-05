@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FiArrowLeft, FiPlay, FiLoader, FiRefreshCcw, FiPlus } from 'react-icons/fi';
+import { FiArrowLeft, FiPlay, FiLoader, FiRefreshCcw, FiPlus, FiLock } from 'react-icons/fi';
 import { cameraAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import './CameraDiscovery.css';
@@ -12,7 +12,26 @@ function CameraDiscovery() {
   const [expanding, setExpanding] = useState({});
   const [filter, setFilter] = useState('all');
   const [addingcameras, setAddingCameras] = useState({});
+  const [addingAll, setAddingAll] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanMessage, setScanMessage] = useState('');
   const { addToast } = useToast();
+
+  const buildPathWithCredentials = (rawPath, username, password) => {
+    let path = rawPath || '/stream';
+    if (!path.startsWith('/')) path = `/${path}`;
+
+    if (path.includes('{user}') || path.includes('{pass}')) {
+      return path
+        .replaceAll('{user}', username)
+        .replaceAll('{pass}', password);
+    }
+
+    // Supports URLs like /user=admin&password=admin&channel=1&stream=0.sdp?
+    path = path.replace(/(user=)[^&]*/i, `$1${encodeURIComponent(username)}`);
+    path = path.replace(/(password=)[^&]*/i, `$1${encodeURIComponent(password)}`);
+    return path;
+  };
 
   useEffect(() => {
     checkScanStatus();
@@ -30,6 +49,8 @@ function CameraDiscovery() {
       const data = await response.json();
       setScanning(data.scanning);
       setResults(data.results || []);
+      setScanProgress(data.progress || 0);
+      setScanMessage(data.message || '');
     } catch (err) {
       console.error('Failed to get discovery status:', err);
     }
@@ -79,6 +100,33 @@ function CameraDiscovery() {
     try {
       setAddingCameras(prev => ({ ...prev, [cameraInfo.stream_url]: true }));
 
+      let username = cameraInfo.username || 'admin';
+      let password = cameraInfo.password || '';
+      let path = cameraInfo.path || '/stream';
+
+      if (cameraInfo.auth_required) {
+        const enteredUser = window.prompt('Камера требует авторизацию. Введите логин:', username);
+        if (enteredUser === null) {
+          addToast('Подключение отменено', 'info');
+          return;
+        }
+        const enteredPass = window.prompt('Введите пароль камеры:', password);
+        if (enteredPass === null) {
+          addToast('Подключение отменено', 'info');
+          return;
+        }
+
+        username = enteredUser.trim();
+        password = enteredPass;
+
+        if (!username) {
+          addToast('Логин обязателен для закрытой камеры', 'error');
+          return;
+        }
+
+        path = buildPathWithCredentials(path, username, password);
+      }
+
       const response = await fetch('/api/camera-discovery/add', {
         method: 'POST',
         headers: {
@@ -89,10 +137,10 @@ function CameraDiscovery() {
           name: `Камера ${cameraInfo.ip_address}:${cameraInfo.port}`,
           ip_address: cameraInfo.ip_address,
           port: cameraInfo.port,
-          username: cameraInfo.username || 'admin',
-          password: cameraInfo.password || '',
+          username,
+          password,
           protocol: cameraInfo.protocol || 'rtsp',
-          path: cameraInfo.path || '/stream',
+          path,
           location: ''
         })
       });
@@ -109,6 +157,30 @@ function CameraDiscovery() {
       addToast('Ошибка при добавлении камеры', 'error');
     } finally {
       setAddingCameras(prev => ({ ...prev, [cameraInfo.stream_url]: false }));
+    }
+  };
+
+  const addAllCameras = async () => {
+    try {
+      setAddingAll(true);
+      const response = await fetch('/api/camera-discovery/add-all', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      });
+
+      if (!response.ok) throw new Error('Failed to add cameras');
+
+      const data = await response.json();
+      addToast(`Добавлено ${data.added_count} камер (пропущено дубликатов: ${data.skipped_count})`, 'success');
+      setResults([]);
+    } catch (err) {
+      console.error('Add all cameras error:', err);
+      addToast('Ошибка при добавлении камер', 'error');
+    } finally {
+      setAddingAll(false);
     }
   };
 
@@ -179,6 +251,20 @@ function CameraDiscovery() {
           <div className="discovery-results">
             <div className="results-header">
               <h3>Найдено точек подключения: {filteredResults.length}</h3>
+              {filteredResults.filter(r => r.verified).length > 0 && (
+                <button
+                  onClick={addAllCameras}
+                  disabled={addingAll}
+                  className="btn btn-primary"
+                  style={{ marginBottom: 8 }}
+                >
+                  {addingAll ? (
+                    <><FiLoader className="spin" /> Добавляю...</>
+                  ) : (
+                    <><FiPlus /> Добавить все ({filteredResults.filter(r => r.verified).length})</>
+                  )}
+                </button>
+              )}
               <div className="filter-buttons">
                 <button
                   className={`btn btn-sm ${filter === 'all' ? 'btn-primary' : 'btn-secondary'}`}
@@ -222,6 +308,14 @@ function CameraDiscovery() {
                             <span className="port">:{camera.port}</span>
                             <span className="path">{camera.path}</span>
                           </div>
+                          {camera.auth_required && (
+                            <div style={{ marginTop: 4 }}>
+                              <small style={{ color: 'var(--warning, #f59e0b)' }}>
+                                <FiLock style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                                Требуется логин/пароль
+                              </small>
+                            </div>
+                          )}
                           <div className="camera-url">
                             <small>{camera.stream_url}</small>
                           </div>
@@ -238,7 +332,8 @@ function CameraDiscovery() {
                             </>
                           ) : (
                             <>
-                              <FiPlus /> Добавить
+                              {camera.auth_required ? <FiLock /> : <FiPlus />}
+                              {camera.auth_required ? ' Подключить' : ' Добавить'}
                             </>
                           )}
                         </button>
@@ -257,11 +352,23 @@ function CameraDiscovery() {
           </div>
         )}
 
-        {scanning && results.length === 0 && (
+        {scanning && (
           <div className="scanning-state">
             <div className="spinner"></div>
             <p>Сканирование сети {network}...</p>
-            <small>Это может занять до 1 минуты</small>
+            <div style={{ width: '100%', maxWidth: 400, margin: '12px auto' }}>
+              <div style={{ background: 'var(--bg-tertiary, #333)', borderRadius: 6, height: 8, overflow: 'hidden' }}>
+                <div style={{
+                  width: `${scanProgress}%`,
+                  height: '100%',
+                  background: 'var(--accent, #4f8cff)',
+                  borderRadius: 6,
+                  transition: 'width 0.3s ease'
+                }} />
+              </div>
+              <small style={{ marginTop: 4, display: 'block' }}>{scanProgress}% — {scanMessage}</small>
+            </div>
+            {results.length > 0 && <small>Уже найдено: {results.filter(r => r.verified).length} камер</small>}
           </div>
         )}
       </div>

@@ -36,14 +36,20 @@ function Employees({ user }) {
 
   const [formData, setFormData] = useState({
     name: '',
+    phone_number: '',
     position: '',
     department: '',
+    planned_check_in: '09:00',
+    planned_check_out: '18:00',
     photo: null, // FILE
   });
   const [editFormData, setEditFormData] = useState({
     name: '',
+    phone_number: '',
     position: '',
     department: '',
+    planned_check_in: '09:00',
+    planned_check_out: '18:00',
   });
 
   const [photoPreview, setPhotoPreview] = useState(null);
@@ -96,8 +102,11 @@ function Employees({ user }) {
   const resetForm = () => {
     setFormData({
       name: '',
+      phone_number: '',
       position: '',
       department: '',
+      planned_check_in: '09:00',
+      planned_check_out: '18:00',
       photo: null,
     });
     setPhotoPreview(null);
@@ -119,8 +128,11 @@ function Employees({ user }) {
     try {
       const data = new FormData();
       data.append('name', formData.name);
+      data.append('phone_number', formData.phone_number);
       data.append('position', formData.position);
       data.append('department', formData.department);
+      data.append('planned_check_in', formData.planned_check_in);
+      data.append('planned_check_out', formData.planned_check_out);
       data.append('photo', formData.photo); // ✅ multipart
 
       const response = await employeeAPI.create(data);
@@ -144,8 +156,11 @@ function Employees({ user }) {
     setEditingEmployee(emp);
     setEditFormData({
       name: emp.name || '',
+      phone_number: emp.phone_number || '',
       position: emp.position || '',
       department: emp.department || '',
+      planned_check_in: emp.planned_check_in || '09:00',
+      planned_check_out: emp.planned_check_out || '18:00',
     });
     setShowEditModal(true);
   };
@@ -167,8 +182,11 @@ function Employees({ user }) {
     try {
       await employeeAPI.update(editingEmployee.id, {
         name: editFormData.name,
+        phone_number: editFormData.phone_number,
         position: editFormData.position,
         department: editFormData.department,
+        planned_check_in: editFormData.planned_check_in,
+        planned_check_out: editFormData.planned_check_out,
       });
       setSuccess('Данные сотрудника обновлены');
       setShowEditModal(false);
@@ -269,8 +287,10 @@ function Employees({ user }) {
                 </div>
                 <h3>{emp.name}</h3>
                 <p>ID: {emp.employee_id}</p>
+                <p>Телефон: {emp.phone_number || '—'}</p>
                 <p>{emp.position || '—'}</p>
                 <p>{emp.department || '—'}</p>
+                <p>График: {emp.planned_check_in || '09:00'} - {emp.planned_check_out || '18:00'}</p>
                 <p>Статус: {emp.active ? 'Активен' : 'Неактивен'}</p>
 
                 {['hr', 'admin', 'super_admin'].includes(user?.role) && (
@@ -331,6 +351,16 @@ function Employees({ user }) {
                   />
                 </div>
 
+                <div className="form-group">
+                  <label className="form-label">Номер телефона</label>
+                  <input
+                    name="phone_number"
+                    className="form-control"
+                    placeholder="+7 777 123 45 67"
+                    onChange={handleInputChange}
+                  />
+                </div>
+
                 <div className="grid grid-2">
                   <div className="form-group">
                     <label className="form-label">Должность</label>
@@ -357,6 +387,31 @@ function Employees({ user }) {
                       ))}
                     </datalist>
                     <span className="form-text">ID сотрудника генерируется автоматически по отделу: 1..., 2..., 3...</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-2">
+                  <div className="form-group">
+                    <label className="form-label">Плановый приход</label>
+                    <input
+                      type="time"
+                      name="planned_check_in"
+                      className="form-control"
+                      value={formData.planned_check_in}
+                      onChange={handleInputChange}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Плановый уход</label>
+                    <input
+                      type="time"
+                      name="planned_check_out"
+                      className="form-control"
+                      value={formData.planned_check_out}
+                      onChange={handleInputChange}
+                      required
+                    />
                   </div>
                 </div>
 
@@ -407,6 +462,17 @@ function Employees({ user }) {
                   />
                 </div>
 
+                <div className="form-group">
+                  <label className="form-label">Номер телефона</label>
+                  <input
+                    name="phone_number"
+                    className="form-control"
+                    value={editFormData.phone_number}
+                    onChange={handleEditInputChange}
+                    placeholder="+7 777 123 45 67"
+                  />
+                </div>
+
                 <div className="grid grid-2">
                   <div className="form-group">
                     <label className="form-label">Должность</label>
@@ -432,6 +498,31 @@ function Employees({ user }) {
                         <option key={dep.id} value={dep.name} />
                       ))}
                     </datalist>
+                  </div>
+                </div>
+
+                <div className="grid grid-2">
+                  <div className="form-group">
+                    <label className="form-label">Плановый приход</label>
+                    <input
+                      type="time"
+                      name="planned_check_in"
+                      className="form-control"
+                      value={editFormData.planned_check_in}
+                      onChange={handleEditInputChange}
+                      required
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Плановый уход</label>
+                    <input
+                      type="time"
+                      name="planned_check_out"
+                      className="form-control"
+                      value={editFormData.planned_check_out}
+                      onChange={handleEditInputChange}
+                      required
+                    />
                   </div>
                 </div>
               </div>

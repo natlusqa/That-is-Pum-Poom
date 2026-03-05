@@ -1,12 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { FiClock, FiChevronLeft, FiChevronRight, FiDownload, FiImage, FiChevronUp, FiChevronDown } from 'react-icons/fi';
+import React, { useState, useEffect, useMemo } from 'react';
+import { FiClock, FiChevronLeft, FiChevronRight, FiDownload, FiImage, FiChevronUp, FiChevronDown, FiEdit2 } from 'react-icons/fi';
 import { attendanceAPI, employeeAPI } from '../services/api';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { useToast } from '../components/ToastProvider';
 import './Attendance.css';
 
-function Attendance() {
+function Attendance({ user }) {
   const [logs, setLogs] = useState([]);
   const [employees, setEmployees] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -32,6 +32,13 @@ function Attendance() {
   const [sortBy, setSortBy] = useState('timestamp');
   const [sortOrder, setSortOrder] = useState('desc');
   const [stats, setStats] = useState({});
+  const [editMode, setEditMode] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editForm, setEditForm] = useState({
+    event_type: 'check-in',
+    timestamp: '',
+    confidence: '',
+  });
 
   const { addToast } = useToast();
 
@@ -155,6 +162,21 @@ function Attendance() {
     }
   };
 
+  const toDateTimeLocal = (value) => {
+    if (!value) return '';
+    try {
+      const d = new Date(value);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      const hh = String(d.getHours()).padStart(2, '0');
+      const mm = String(d.getMinutes()).padStart(2, '0');
+      return `${y}-${m}-${day}T${hh}:${mm}`;
+    } catch {
+      return '';
+    }
+  };
+
   const getEventBadge = (eventType) => {
     const badges = {
       'check-in': { color: '#27ae60', text: 'Вход' },
@@ -164,6 +186,13 @@ function Attendance() {
     return badges[eventType] || badges['default'];
   };
 
+  const getStatusLabel = (status) => {
+    if (status === 'on_time') return 'Вовремя';
+    if (status === 'late') return 'Опоздание';
+    if (status === 'left_early') return 'Ранний уход';
+    return 'Нет данных';
+  };
+
   const getDepartments = () => {
     const depts = new Set();
     employees.forEach((emp) => {
@@ -171,6 +200,133 @@ function Attendance() {
     });
     return Array.from(depts).sort();
   };
+
+  const canEditAttendance = ['hr', 'admin', 'super_admin'].includes(user?.role);
+
+  const openEditForLog = (log) => {
+    setEditForm({
+      event_type: log.event_type || 'check-in',
+      timestamp: toDateTimeLocal(log.timestamp),
+      confidence: log.confidence ?? '',
+    });
+    setEditMode(true);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedLog) return;
+    if (!editForm.timestamp) {
+      addToast('Укажите дату и время', 'error');
+      return;
+    }
+    try {
+      setSavingEdit(true);
+      await attendanceAPI.update(selectedLog.id, {
+        event_type: editForm.event_type,
+        timestamp: new Date(editForm.timestamp).toISOString(),
+        confidence: editForm.confidence === '' ? null : Number(editForm.confidence),
+      });
+      addToast('Запись посещаемости обновлена', 'success');
+      setEditMode(false);
+      setSelectedLog(null);
+      await loadAttendanceLogs();
+    } catch (err) {
+      addToast(err.response?.data?.error || 'Не удалось обновить запись', 'error');
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const parseDay = (value) => {
+    if (!value) return '';
+    try {
+      return format(new Date(value), 'yyyy-MM-dd');
+    } catch {
+      return '';
+    }
+  };
+
+  const buildPlannedDate = (day, hhmm, fallback) => {
+    const baseTime = (hhmm || fallback || '').trim();
+    if (!day || !/^\d{2}:\d{2}$/.test(baseTime)) return null;
+    const dt = new Date(`${day}T${baseTime}:00`);
+    return Number.isNaN(dt.getTime()) ? null : dt;
+  };
+
+  const formatTimeOnly = (value) => {
+    if (!value) return '—';
+    try {
+      return format(new Date(value), 'HH:mm');
+    } catch {
+      return '—';
+    }
+  };
+
+  const scheduleRows = useMemo(() => {
+    const byKey = new Map();
+
+    logs.forEach((log) => {
+      const day = parseDay(log.timestamp || log.first_seen_today || log.last_seen_today);
+      if (!day) return;
+      const key = `${log.employee_id || log.employee_name || 'unknown'}|${day}`;
+
+      if (!byKey.has(key)) {
+        byKey.set(key, {
+          key,
+          day,
+          employee_name: log.employee_name || '—',
+          employee_id: log.employee_id || '—',
+          department: log.department || '—',
+          schedule_check_in: log.schedule_check_in || '09:00',
+          schedule_check_out: log.schedule_check_out || '18:00',
+          first_seen_today: log.first_seen_today || null,
+          last_seen_today: log.last_seen_today || null,
+          arrival_status: log.arrival_status || null,
+          departure_status: log.departure_status || null,
+        });
+        return;
+      }
+
+      const row = byKey.get(key);
+      if (log.first_seen_today) {
+        if (!row.first_seen_today || new Date(log.first_seen_today) < new Date(row.first_seen_today)) {
+          row.first_seen_today = log.first_seen_today;
+        }
+      }
+      if (log.last_seen_today) {
+        if (!row.last_seen_today || new Date(log.last_seen_today) > new Date(row.last_seen_today)) {
+          row.last_seen_today = log.last_seen_today;
+        }
+      }
+      row.arrival_status = row.arrival_status || log.arrival_status || null;
+      row.departure_status = row.departure_status || log.departure_status || null;
+    });
+
+    return Array.from(byKey.values())
+      .map((row) => {
+        const plannedIn = buildPlannedDate(row.day, row.schedule_check_in, '09:00');
+        const plannedOut = buildPlannedDate(row.day, row.schedule_check_out, '18:00');
+        const actualIn = row.first_seen_today ? new Date(row.first_seen_today) : null;
+        const actualOut = row.last_seen_today ? new Date(row.last_seen_today) : null;
+
+        const lateMinutes = (plannedIn && actualIn)
+          ? Math.max(0, Math.round((actualIn.getTime() - plannedIn.getTime()) / 60000))
+          : null;
+        const earlyLeaveMinutes = (plannedOut && actualOut)
+          ? Math.max(0, Math.round((plannedOut.getTime() - actualOut.getTime()) / 60000))
+          : null;
+
+        return {
+          ...row,
+          lateMinutes,
+          earlyLeaveMinutes,
+        };
+      })
+      .sort((a, b) => {
+        const dateDiff = new Date(b.day).getTime() - new Date(a.day).getTime();
+        if (dateDiff !== 0) return dateDiff;
+        return (a.employee_name || '').localeCompare(b.employee_name || '', 'ru');
+      });
+  }, [logs]);
 
   const sortedLogs = [...logs].sort((a, b) => {
     let aVal, bVal;
@@ -359,6 +515,8 @@ function Attendance() {
                       Сотрудник <SortIcon column="employee" />
                     </th>
                     <th>Отдел</th>
+                    <th>Приход (план/факт)</th>
+                    <th>Уход (план/факт)</th>
                     <th>Событие</th>
                     <th onClick={() => handleSort('confidence')} className="sortable">
                       Уверенность <SortIcon column="confidence" />
@@ -380,6 +538,22 @@ function Attendance() {
                           <small>{log.employee_id}</small>
                         </td>
                         <td>{log.department || '—'}</td>
+                        <td>
+                          <div>
+                            <strong>{log.schedule_check_in || '09:00'}</strong>
+                            <small style={{ display: 'block', color: 'var(--text-muted)' }}>
+                              {log.first_seen_today ? formatDateTime(log.first_seen_today).split(' ').slice(-1)[0] : '—'} ({getStatusLabel(log.arrival_status)})
+                            </small>
+                          </div>
+                        </td>
+                        <td>
+                          <div>
+                            <strong>{log.schedule_check_out || '18:00'}</strong>
+                            <small style={{ display: 'block', color: 'var(--text-muted)' }}>
+                              {log.last_seen_today ? formatDateTime(log.last_seen_today).split(' ').slice(-1)[0] : '—'} ({getStatusLabel(log.departure_status)})
+                            </small>
+                          </div>
+                        </td>
                         <td>
                           <span className="event-badge" style={{ backgroundColor: eventBadge.color }}>
                             {eventBadge.text}
@@ -405,6 +579,18 @@ function Attendance() {
                           >
                             <FiImage size={18} />
                           </button>
+                          {canEditAttendance && log.can_edit && (
+                            <button
+                              onClick={() => {
+                                setSelectedLog(log);
+                                openEditForLog(log);
+                              }}
+                              className="btn-icon"
+                              title="Редактировать запись"
+                            >
+                              <FiEdit2 size={18} />
+                            </button>
+                          )}
                         </td>
                       </tr>
                     );
@@ -438,13 +624,65 @@ function Attendance() {
           </div>
         )}
 
+        {!loading && scheduleRows.length > 0 && (
+          <div className="card" style={{ marginTop: '1rem' }}>
+            <div style={{ padding: '1rem 1rem 0.5rem 1rem' }}>
+              <h3 style={{ margin: 0 }}>Таблица расписания и опозданий</h3>
+            </div>
+            <div className="table-responsive">
+              <table className="attendance-table">
+                <thead>
+                  <tr>
+                    <th>Дата</th>
+                    <th>Сотрудник</th>
+                    <th>Отдел</th>
+                    <th>План прихода</th>
+                    <th>Факт прихода</th>
+                    <th>Опоздание (мин)</th>
+                    <th>План ухода</th>
+                    <th>Факт ухода</th>
+                    <th>Ранний уход (мин)</th>
+                    <th>Статус</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {scheduleRows.map((row) => (
+                    <tr key={row.key}>
+                      <td>{row.day}</td>
+                      <td>
+                        <strong>{row.employee_name}</strong>
+                        <small style={{ display: 'block', color: 'var(--text-muted)' }}>{row.employee_id}</small>
+                      </td>
+                      <td>{row.department || '—'}</td>
+                      <td>{row.schedule_check_in || '09:00'}</td>
+                      <td>{formatTimeOnly(row.first_seen_today)}</td>
+                      <td>
+                        {row.lateMinutes === null ? '—' : row.lateMinutes > 0 ? row.lateMinutes : 0}
+                      </td>
+                      <td>{row.schedule_check_out || '18:00'}</td>
+                      <td>{formatTimeOnly(row.last_seen_today)}</td>
+                      <td>
+                        {row.earlyLeaveMinutes === null ? '—' : row.earlyLeaveMinutes > 0 ? row.earlyLeaveMinutes : 0}
+                      </td>
+                      <td>
+                        Приход: {getStatusLabel(row.arrival_status)}<br />
+                        Уход: {getStatusLabel(row.departure_status)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* Detail Modal */}
         {selectedLog && (
-          <div className="modal-overlay" onClick={() => setSelectedLog(null)}>
+          <div className="modal-overlay" onClick={() => { setSelectedLog(null); setEditMode(false); }}>
             <div className="modal" onClick={(e) => e.stopPropagation()}>
               <div className="modal-header">
                 <h2>Детали события</h2>
-                <button className="btn-close" onClick={() => setSelectedLog(null)}>x</button>
+                <button className="btn-close" onClick={() => { setSelectedLog(null); setEditMode(false); }}>x</button>
               </div>
               <div className="modal-body">
                 <div className="proof-info">
@@ -465,6 +703,18 @@ function Attendance() {
                     <span className="info-value">{getEventBadge(selectedLog.event_type).text}</span>
                   </div>
                   <div className="info-row">
+                    <span className="info-label">Приход (план/факт):</span>
+                    <span className="info-value">
+                      {(selectedLog.schedule_check_in || '09:00')} / {selectedLog.first_seen_today ? formatDateTime(selectedLog.first_seen_today).split(' ').slice(-1)[0] : '—'} ({getStatusLabel(selectedLog.arrival_status)})
+                    </span>
+                  </div>
+                  <div className="info-row">
+                    <span className="info-label">Уход (план/факт):</span>
+                    <span className="info-value">
+                      {(selectedLog.schedule_check_out || '18:00')} / {selectedLog.last_seen_today ? formatDateTime(selectedLog.last_seen_today).split(' ').slice(-1)[0] : '—'} ({getStatusLabel(selectedLog.departure_status)})
+                    </span>
+                  </div>
+                  <div className="info-row">
                     <span className="info-label">Дата:</span>
                     <span className="info-value">{formatDateTime(selectedLog.timestamp)}</span>
                   </div>
@@ -479,6 +729,72 @@ function Attendance() {
                     </span>
                   </div>
                 </div>
+
+                {canEditAttendance && (
+                  <div style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid var(--border-color)' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                      <h3 style={{ margin: 0, fontSize: '1rem' }}>Редактирование посещаемости</h3>
+                      {!editMode && selectedLog.can_edit && (
+                        <button className="btn btn-secondary btn-sm" onClick={() => openEditForLog(selectedLog)}>
+                          <FiEdit2 /> Редактировать
+                        </button>
+                      )}
+                    </div>
+
+                    {!selectedLog.can_edit ? (
+                      <small style={{ color: 'var(--text-tertiary)' }}>
+                        Можно редактировать только записи за последние 7 дней.
+                      </small>
+                    ) : editMode ? (
+                      <div className="grid grid-2">
+                        <div className="form-group">
+                          <label className="form-label">Тип события</label>
+                          <select
+                            className="form-control"
+                            value={editForm.event_type}
+                            onChange={(e) => setEditForm(prev => ({ ...prev, event_type: e.target.value }))}
+                          >
+                            <option value="check-in">Вход</option>
+                            <option value="check-out">Выход</option>
+                          </select>
+                        </div>
+                        <div className="form-group">
+                          <label className="form-label">Дата и время</label>
+                          <input
+                            type="datetime-local"
+                            className="form-control"
+                            value={editForm.timestamp}
+                            onChange={(e) => setEditForm(prev => ({ ...prev, timestamp: e.target.value }))}
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label className="form-label">Уверенность (0..1)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            max="1"
+                            className="form-control"
+                            value={editForm.confidence}
+                            onChange={(e) => setEditForm(prev => ({ ...prev, confidence: e.target.value }))}
+                          />
+                        </div>
+                        <div className="form-group" style={{ display: 'flex', alignItems: 'end', gap: '0.5rem' }}>
+                          <button className="btn btn-primary" onClick={handleSaveEdit} disabled={savingEdit}>
+                            {savingEdit ? 'Сохранение...' : 'Сохранить'}
+                          </button>
+                          <button className="btn btn-secondary" onClick={() => setEditMode(false)} disabled={savingEdit}>
+                            Отмена
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <small style={{ color: 'var(--text-tertiary)' }}>
+                        Доступно для ролей HR, Admin и Super Admin.
+                      </small>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           </div>

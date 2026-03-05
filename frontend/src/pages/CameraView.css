@@ -36,11 +36,13 @@
   border: 1px solid var(--border-color);
   box-shadow: var(--shadow-lg);
   position: relative;
+  max-height: calc(100vh - 220px);
 }
 
 .video-container:fullscreen {
   border-radius: 0;
   border: none;
+  max-height: 100vh;
 }
 
 .video-container:fullscreen .video-stream {
@@ -49,15 +51,15 @@
 
 .video-stream {
   width: 100%;
-  height: auto;
+  height: min(68vh, calc(100vh - 260px));
   display: block;
-  min-height: 480px;
+  min-height: 280px;
   object-fit: contain;
   background: #000;
 }
 
 .video-placeholder {
-  min-height: 480px;
+  min-height: 280px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -120,7 +122,7 @@
 /* MSE Player overlays */
 .mse-player {
   width: 100%;
-  min-height: 480px;
+  min-height: 280px;
 }
 
 .mse-overlay {
@@ -192,11 +194,20 @@
 
   .video-stream,
   .mse-player {
-    min-height: 280px;
+    min-height: 220px;
   }
 
   .video-toolbar {
     opacity: 1;
     bottom: 10px;
+  }
+
+  .video-container {
+    max-height: calc(100vh - 180px);
+  }
+
+  .video-stream {
+    height: min(55vh, calc(100vh - 210px));
+    min-height: 220px;
   }
 }

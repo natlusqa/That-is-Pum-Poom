@@ -20,6 +20,9 @@ import threading
 import logging
 import signal
 import sys
+import subprocess
+import glob as globmod
+import re
 from datetime import datetime, timezone, timedelta
 from queue import Queue, Empty
 from face_core import face_engine
@@ -37,11 +40,18 @@ API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:5002')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
 THRESHOLD = float(os.environ.get('FACE_THRESHOLD', '0.5'))
 COOLDOWN = int(os.environ.get('FACE_COOLDOWN', '60'))
+ABSENCE_CHECKOUT_HOURS = float(os.environ.get('ABSENCE_CHECKOUT_HOURS', '3'))
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '10'))
 FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '3'))
 PROCESS_WIDTH = int(os.environ.get('PROCESS_WIDTH', '960'))  # resize before inference
 HEARTBEAT_INTERVAL = 30
 FACE_RELOAD_INTERVAL = int(os.environ.get('FACE_RELOAD_INTERVAL', '30'))
+
+# Recording config
+RECORDING_ENABLED = os.environ.get('RECORDING_ENABLED', 'true').lower() == 'true'
+RECORDING_SEGMENT_SECONDS = int(os.environ.get('RECORDING_SEGMENT_SECONDS', '300'))
+RECORDING_TEMP_DIR = os.environ.get('RECORDING_TEMP_DIR', os.path.join(os.path.dirname(__file__), 'recording_tmp'))
+ABSENCE_CHECKOUT_DELTA = timedelta(hours=ABSENCE_CHECKOUT_HOURS)
 
 # Timezone
 ASTANA_TZ = timezone(timedelta(hours=5))
@@ -264,7 +274,7 @@ class CameraWorker(threading.Thread):
                     'camera_id': self.camera_id,
                     'timestamp': now.isoformat(),
                     'confidence': float(sim),
-                    'event_type': 'check-in'
+                    'event_type': 'seen'
                 }
                 self.log_queue.put(log_entry)
                 self.last_seen[emp_id] = now
@@ -321,18 +331,112 @@ class AttendanceLogger(threading.Thread):
         self.log_queue = log_queue
         self.shutdown_event = shutdown_event
         self.log = logging.getLogger("logger")
+        self.employee_state = {}
+
+    def _parse_entry_ts(self, entry):
+        ts_raw = entry.get('timestamp')
+        if not ts_raw:
+            return get_astana_time()
+        try:
+            return datetime.fromisoformat(str(ts_raw))
+        except Exception:
+            return get_astana_time()
+
+    def _employee_seen_to_events(self, entry):
+        employee_id = entry.get('employee_id')
+        camera_id = entry.get('camera_id')
+        if employee_id is None or camera_id is None:
+            return []
+
+        ts = self._parse_entry_ts(entry)
+        confidence = float(entry.get('confidence', 0.0))
+        state = self.employee_state.get(employee_id, {
+            'in_office': False,
+            'last_seen': None,
+            'last_camera_id': camera_id,
+            'last_confidence': confidence,
+        })
+
+        events = []
+        last_seen = state.get('last_seen')
+        in_office = bool(state.get('in_office'))
+
+        # If employee was considered in office but absent for >3h,
+        # auto-close the previous visit and start a new one.
+        if in_office and isinstance(last_seen, datetime) and (ts - last_seen) >= ABSENCE_CHECKOUT_DELTA:
+            events.append({
+                'employee_id': employee_id,
+                'camera_id': state.get('last_camera_id', camera_id),
+                'timestamp': (last_seen + ABSENCE_CHECKOUT_DELTA).isoformat(),
+                'confidence': float(state.get('last_confidence', confidence)),
+                'event_type': 'check-out',
+            })
+            in_office = False
+
+        # Toggle logic: first detection -> check-in, next -> check-out.
+        event_type = 'check-out' if in_office else 'check-in'
+        events.append({
+            'employee_id': employee_id,
+            'camera_id': camera_id,
+            'timestamp': ts.isoformat(),
+            'confidence': confidence,
+            'event_type': event_type,
+        })
+
+        self.employee_state[employee_id] = {
+            'in_office': (event_type == 'check-in'),
+            'last_seen': ts,
+            'last_camera_id': camera_id,
+            'last_confidence': confidence,
+        }
+        return events
+
+    def _convert_entry(self, entry):
+        event_type = (entry.get('event_type') or '').strip().lower()
+        if event_type in ('check-in', 'check-out'):
+            return [entry]
+        if event_type == 'seen':
+            return self._employee_seen_to_events(entry)
+        return []
+
+    def _emit_absence_checkouts(self):
+        now = get_astana_time()
+        events = []
+        for employee_id, state in self.employee_state.items():
+            if not state.get('in_office'):
+                continue
+            last_seen = state.get('last_seen')
+            if not isinstance(last_seen, datetime):
+                continue
+            if (now - last_seen) >= ABSENCE_CHECKOUT_DELTA:
+                checkout_ts = last_seen + ABSENCE_CHECKOUT_DELTA
+                events.append({
+                    'employee_id': employee_id,
+                    'camera_id': state.get('last_camera_id'),
+                    'timestamp': checkout_ts.isoformat(),
+                    'confidence': float(state.get('last_confidence', 0.0)),
+                    'event_type': 'check-out',
+                })
+                state['in_office'] = False
+
+        return events
 
     def run(self):
         self.log.info("Attendance logger started")
         batch = []
         last_flush = time.time()
+        last_absence_check = time.time()
 
         while not self.shutdown_event.is_set():
             try:
                 entry = self.log_queue.get(timeout=1)
-                batch.append(entry)
+                batch.extend(self._convert_entry(entry))
             except Empty:
                 pass
+
+            if time.time() - last_absence_check >= 30:
+                batch.extend(self._emit_absence_checkouts())
+                last_absence_check = time.time()
 
             # Flush every 5 entries or every 2 seconds
             if len(batch) >= 5 or (batch and time.time() - last_flush > 2):
@@ -361,6 +465,187 @@ class AttendanceLogger(threading.Thread):
             self.log.error(f"Attendance flush failed: {e}")
 
 
+# --- CAMERA RECORDER (FFmpeg segment muxer) ---
+
+class CameraRecorder:
+    """
+    Records RTSP stream to disk using FFmpeg segment muxer.
+    -c copy = zero CPU (just remuxing, no transcoding).
+    Produces 5-minute .mp4 segments named with timestamps.
+    """
+
+    def __init__(self, camera_id, camera_url, camera_name, shutdown_event):
+        self.camera_id = camera_id
+        self.camera_url = camera_url
+        self.camera_name = camera_name
+        self.shutdown_event = shutdown_event
+        self.process = None
+        self.output_dir = os.path.join(RECORDING_TEMP_DIR, f"cam_{camera_id}")
+        self.log = logging.getLogger(f"rec-{camera_id}")
+        self._thread = None
+
+    def start(self):
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"rec-{self.camera_id}")
+        self._thread.start()
+
+    def _build_ffmpeg_cmd(self):
+        output_pattern = os.path.join(self.output_dir, f"cam{self.camera_id}_%Y%m%d_%H%M%S.mp4")
+        return [
+            'ffmpeg',
+            '-rtsp_transport', 'tcp',
+            '-i', self.camera_url,
+            '-c', 'copy',
+            '-f', 'segment',
+            '-segment_time', str(RECORDING_SEGMENT_SECONDS),
+            '-reset_timestamps', '1',
+            '-strftime', '1',
+            '-y',
+            output_pattern,
+        ]
+
+    def _run(self):
+        self.log.info(f"Starting recorder for '{self.camera_name}'")
+        while not self.shutdown_event.is_set():
+            cmd = self._build_ffmpeg_cmd()
+            self.log.info(f"FFmpeg cmd: {' '.join(cmd[:6])}...")
+            try:
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                # Monitor process
+                while not self.shutdown_event.is_set():
+                    retcode = self.process.poll()
+                    if retcode is not None:
+                        stderr_out = self.process.stderr.read().decode(errors='replace')[-500:]
+                        self.log.warning(f"FFmpeg exited with code {retcode}: {stderr_out}")
+                        break
+                    self.shutdown_event.wait(timeout=2)
+            except FileNotFoundError:
+                self.log.error("FFmpeg not found! Install ffmpeg to enable recording.")
+                return
+            except Exception as e:
+                self.log.error(f"Recorder error: {e}")
+
+            if not self.shutdown_event.is_set():
+                self.log.info("Restarting FFmpeg in 5s...")
+                self.shutdown_event.wait(timeout=5)
+
+        self.log.info(f"Recorder stopped for '{self.camera_name}'")
+
+    def stop(self):
+        if self.process and self.process.poll() is None:
+            self.log.info("Terminating FFmpeg process")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+    def get_completed_segments(self):
+        """Return list of segment files that are no longer being written to."""
+        completed = []
+        now = time.time()
+        for path in globmod.glob(os.path.join(self.output_dir, f"cam{self.camera_id}_*.mp4")):
+            mtime = os.path.getmtime(path)
+            size = os.path.getsize(path)
+            # File is complete if it hasn't been modified for segment_time + 10s buffer
+            if size > 0 and (now - mtime) > (RECORDING_SEGMENT_SECONDS + 10):
+                completed.append(path)
+        return sorted(completed)
+
+
+# --- RECORDING UPLOADER THREAD ---
+
+class RecordingUploader(threading.Thread):
+    """
+    Background thread that uploads completed recording segments to the backend API.
+    Watches all camera recorder directories, uploads completed files, deletes after success.
+    """
+
+    def __init__(self, recorders, shutdown_event):
+        super().__init__(daemon=True, name="recording-uploader")
+        self.recorders = recorders  # dict: camera_id -> CameraRecorder
+        self.shutdown_event = shutdown_event
+        self.log = logging.getLogger("uploader")
+        self.failed_attempts = {}  # path -> retry count
+
+    def run(self):
+        self.log.info("Recording uploader started")
+        while not self.shutdown_event.is_set():
+            self.shutdown_event.wait(timeout=30)
+            if self.shutdown_event.is_set():
+                break
+            self._scan_and_upload()
+
+        # Final upload attempt
+        self._scan_and_upload()
+        self.log.info("Recording uploader stopped")
+
+    def _scan_and_upload(self):
+        for camera_id, recorder in self.recorders.items():
+            segments = recorder.get_completed_segments()
+            for path in segments:
+                if self.shutdown_event.is_set():
+                    return
+                self._upload_segment(camera_id, path)
+
+    def _upload_segment(self, camera_id, path):
+        retries = self.failed_attempts.get(path, 0)
+        if retries >= 3:
+            self.log.error(f"Giving up on {os.path.basename(path)} after 3 failures, deleting")
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            self.failed_attempts.pop(path, None)
+            return
+
+        # Parse start time from filename: cam1_20260227_143000.mp4
+        basename = os.path.basename(path)
+        match = re.search(r'cam\d+_(\d{8}_\d{6})\.mp4', basename)
+        if not match:
+            self.log.warning(f"Cannot parse timestamp from {basename}, skipping")
+            return
+
+        start_str = match.group(1)
+        try:
+            start_time = datetime.strptime(start_str, '%Y%m%d_%H%M%S').replace(tzinfo=ASTANA_TZ)
+        except ValueError:
+            self.log.warning(f"Invalid timestamp in {basename}")
+            return
+
+        end_time = start_time + timedelta(seconds=RECORDING_SEGMENT_SECONDS)
+
+        try:
+            with open(path, 'rb') as f:
+                resp = requests.post(
+                    f"{API_BASE_URL}/api/internal/worker/recording",
+                    data={
+                        'camera_id': camera_id,
+                        'event_type': 'continuous',
+                        'start_time': start_time.isoformat(),
+                        'end_time': end_time.isoformat(),
+                    },
+                    files={'file': (basename, f, 'video/mp4')},
+                    headers=api_headers(),
+                    timeout=120,
+                )
+
+            if resp.status_code == 201:
+                self.log.info(f"Uploaded {basename} (camera {camera_id})")
+                os.remove(path)
+                self.failed_attempts.pop(path, None)
+            else:
+                self.log.error(f"Upload failed for {basename}: HTTP {resp.status_code}")
+                self.failed_attempts[path] = retries + 1
+        except Exception as e:
+            self.log.error(f"Upload error for {basename}: {e}")
+            self.failed_attempts[path] = retries + 1
+
+
 # --- ORCHESTRATOR ---
 
 class WorkerOrchestrator:
@@ -371,6 +656,7 @@ class WorkerOrchestrator:
 
     def __init__(self):
         self.workers = {}
+        self.recorders = {}
         self.log_queue = Queue()
         self.shutdown_event = threading.Event()
         self.face_data = {'matrix': np.empty((0, 512), dtype=np.float32), 'ids': [], 'names': []}
@@ -394,6 +680,22 @@ class WorkerOrchestrator:
             return resp.json()
         except Exception as e:
             self.log.error(f"Failed to load cameras: {e}")
+            return []
+
+    def load_recording_cameras(self):
+        """Load ALL active cameras for recording (not just face-recognition ones)"""
+        try:
+            resp = requests.get(
+                f"{API_BASE_URL}/api/internal/worker/recording-cameras",
+                headers=api_headers(),
+                timeout=10
+            )
+            if resp.status_code != 200:
+                self.log.error(f"Failed to load recording cameras: HTTP {resp.status_code}")
+                return []
+            return resp.json()
+        except Exception as e:
+            self.log.error(f"Failed to load recording cameras: {e}")
             return []
 
     def load_faces(self):
@@ -441,6 +743,9 @@ class WorkerOrchestrator:
         self.log.info(f"  API: {API_BASE_URL}")
         self.log.info(f"  Threshold: {THRESHOLD}, Cooldown: {COOLDOWN}s, FrameSkip: {FRAME_SKIP}")
         self.log.info(f"  Process Width: {PROCESS_WIDTH}px")
+        self.log.info(f"  Recording: {'ENABLED' if RECORDING_ENABLED else 'DISABLED'}")
+        if RECORDING_ENABLED:
+            self.log.info(f"  Segment Duration: {RECORDING_SEGMENT_SECONDS}s")
         self.log.info("=" * 60)
 
         # Load face recognition model (once, shared by all threads)
@@ -452,38 +757,60 @@ class WorkerOrchestrator:
         # Wait for backend to be ready
         self._wait_for_backend()
 
-        # Load cameras from API
+        # Load cameras from API (face recognition)
         cameras = self.load_cameras()
-        if not cameras:
-            self.log.warning("No cameras with face recognition enabled. Exiting.")
+        if not cameras and not RECORDING_ENABLED:
+            self.log.warning("No cameras with face recognition enabled and recording disabled. Exiting.")
             return
+        if not cameras:
+            self.log.warning("No cameras with face recognition enabled (recording may still run)")
 
-        # Load known faces
-        self.load_faces()
+        # Start face recognition workers (if cameras available)
+        if cameras:
+            self.load_faces()
 
-        # Start attendance logger
-        att_logger = AttendanceLogger(self.log_queue, self.shutdown_event)
-        att_logger.start()
+            att_logger = AttendanceLogger(self.log_queue, self.shutdown_event)
+            att_logger.start()
 
-        # Start face reload thread
-        face_reloader = threading.Thread(target=self._face_reload_loop, daemon=True, name="face-reload")
-        face_reloader.start()
+            face_reloader = threading.Thread(target=self._face_reload_loop, daemon=True, name="face-reload")
+            face_reloader.start()
 
-        # Start camera workers
-        num_workers = min(len(cameras), MAX_WORKERS)
-        self.log.info(f"Starting {num_workers} camera workers")
+            num_workers = min(len(cameras), MAX_WORKERS)
+            self.log.info(f"Starting {num_workers} camera workers")
 
-        for cam in cameras[:num_workers]:
-            worker = CameraWorker(
-                camera_id=cam['id'],
-                camera_url=cam['stream_url'],
-                camera_name=cam['name'],
-                face_data=self.face_data,
-                log_queue=self.log_queue,
-                shutdown_event=self.shutdown_event
-            )
-            worker.start()
-            self.workers[cam['id']] = worker
+            for cam in cameras[:num_workers]:
+                worker = CameraWorker(
+                    camera_id=cam['id'],
+                    camera_url=cam['stream_url'],
+                    camera_name=cam['name'],
+                    face_data=self.face_data,
+                    log_queue=self.log_queue,
+                    shutdown_event=self.shutdown_event
+                )
+                worker.start()
+                self.workers[cam['id']] = worker
+
+        # Start recording (if enabled)
+        if RECORDING_ENABLED:
+            rec_cameras = self.load_recording_cameras()
+            if rec_cameras:
+                os.makedirs(RECORDING_TEMP_DIR, exist_ok=True)
+                self.log.info(f"Starting recorders for {len(rec_cameras)} cameras")
+                for cam in rec_cameras:
+                    recorder = CameraRecorder(
+                        camera_id=cam['id'],
+                        camera_url=cam['stream_url'],
+                        camera_name=cam['name'],
+                        shutdown_event=self.shutdown_event,
+                    )
+                    recorder.start()
+                    self.recorders[cam['id']] = recorder
+
+                # Start uploader thread
+                uploader = RecordingUploader(self.recorders, self.shutdown_event)
+                uploader.start()
+            else:
+                self.log.warning("No cameras available for recording")
 
         # Monitor loop
         self.log.info("All workers started. Monitoring...")
@@ -513,6 +840,10 @@ class WorkerOrchestrator:
 
         self.log.info("Shutting down workers...")
         self.shutdown_event.set()
+
+        # Stop recorders (terminate FFmpeg)
+        for recorder in self.recorders.values():
+            recorder.stop()
 
         # Wait for threads to finish
         for worker in self.workers.values():
