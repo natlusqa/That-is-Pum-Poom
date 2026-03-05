@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { FiArrowLeft, FiPlay, FiLoader, FiRefreshCcw, FiPlus } from 'react-icons/fi';
+import { FiArrowLeft, FiPlay, FiLoader, FiRefreshCcw, FiPlus, FiLock } from 'react-icons/fi';
 import { cameraAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 import './CameraDiscovery.css';
@@ -16,6 +16,22 @@ function CameraDiscovery() {
   const [scanProgress, setScanProgress] = useState(0);
   const [scanMessage, setScanMessage] = useState('');
   const { addToast } = useToast();
+
+  const buildPathWithCredentials = (rawPath, username, password) => {
+    let path = rawPath || '/stream';
+    if (!path.startsWith('/')) path = `/${path}`;
+
+    if (path.includes('{user}') || path.includes('{pass}')) {
+      return path
+        .replaceAll('{user}', username)
+        .replaceAll('{pass}', password);
+    }
+
+    // Supports URLs like /user=admin&password=admin&channel=1&stream=0.sdp?
+    path = path.replace(/(user=)[^&]*/i, `$1${encodeURIComponent(username)}`);
+    path = path.replace(/(password=)[^&]*/i, `$1${encodeURIComponent(password)}`);
+    return path;
+  };
 
   useEffect(() => {
     checkScanStatus();
@@ -84,6 +100,33 @@ function CameraDiscovery() {
     try {
       setAddingCameras(prev => ({ ...prev, [cameraInfo.stream_url]: true }));
 
+      let username = cameraInfo.username || 'admin';
+      let password = cameraInfo.password || '';
+      let path = cameraInfo.path || '/stream';
+
+      if (cameraInfo.auth_required) {
+        const enteredUser = window.prompt('Камера требует авторизацию. Введите логин:', username);
+        if (enteredUser === null) {
+          addToast('Подключение отменено', 'info');
+          return;
+        }
+        const enteredPass = window.prompt('Введите пароль камеры:', password);
+        if (enteredPass === null) {
+          addToast('Подключение отменено', 'info');
+          return;
+        }
+
+        username = enteredUser.trim();
+        password = enteredPass;
+
+        if (!username) {
+          addToast('Логин обязателен для закрытой камеры', 'error');
+          return;
+        }
+
+        path = buildPathWithCredentials(path, username, password);
+      }
+
       const response = await fetch('/api/camera-discovery/add', {
         method: 'POST',
         headers: {
@@ -94,10 +137,10 @@ function CameraDiscovery() {
           name: `Камера ${cameraInfo.ip_address}:${cameraInfo.port}`,
           ip_address: cameraInfo.ip_address,
           port: cameraInfo.port,
-          username: cameraInfo.username || 'admin',
-          password: cameraInfo.password || '',
+          username,
+          password,
           protocol: cameraInfo.protocol || 'rtsp',
-          path: cameraInfo.path || '/stream',
+          path,
           location: ''
         })
       });
@@ -265,6 +308,14 @@ function CameraDiscovery() {
                             <span className="port">:{camera.port}</span>
                             <span className="path">{camera.path}</span>
                           </div>
+                          {camera.auth_required && (
+                            <div style={{ marginTop: 4 }}>
+                              <small style={{ color: 'var(--warning, #f59e0b)' }}>
+                                <FiLock style={{ verticalAlign: 'middle', marginRight: 4 }} />
+                                Требуется логин/пароль
+                              </small>
+                            </div>
+                          )}
                           <div className="camera-url">
                             <small>{camera.stream_url}</small>
                           </div>
@@ -281,7 +332,8 @@ function CameraDiscovery() {
                             </>
                           ) : (
                             <>
-                              <FiPlus /> Добавить
+                              {camera.auth_required ? <FiLock /> : <FiPlus />}
+                              {camera.auth_required ? ' Подключить' : ' Добавить'}
                             </>
                           )}
                         </button>

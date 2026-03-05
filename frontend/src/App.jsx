@@ -105,7 +105,7 @@ function App() {
               </ProtectedRoute>
             }
           />
-          <Route path="attendance" element={<Attendance />} />
+          <Route path="attendance" element={<Attendance user={user} />} />
           <Route path="recordings" element={<Recordings />} />
           <Route
             path="login-history"

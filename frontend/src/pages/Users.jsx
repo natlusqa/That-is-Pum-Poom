@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { FiUser, FiPlus, FiTrash2, FiShield } from 'react-icons/fi';
+import { FiUser, FiPlus, FiTrash2, FiShield, FiEye, FiEyeOff } from 'react-icons/fi';
 import { userAPI } from '../services/api';
 import { useToast } from '../components/ToastProvider';
 
@@ -9,6 +9,7 @@ function Users() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const { addToast } = useToast();
@@ -79,6 +80,7 @@ function Users() {
       password: '',
       role: 'employee',
     });
+    setShowPassword(false);
   };
 
   const formatDate = (dateString) => {
@@ -217,16 +219,35 @@ function Users() {
 
                   <div className="form-group">
                     <label className="form-label">Пароль *</label>
-                    <input
-                      type="password"
-                      name="password"
-                      className="form-control"
-                      value={formData.password}
-                      onChange={handleInputChange}
-                      placeholder="••••••••"
-                      minLength="6"
-                      required
-                    />
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        type={showPassword ? 'text' : 'password'}
+                        name="password"
+                        className="form-control"
+                        value={formData.password}
+                        onChange={handleInputChange}
+                        placeholder="••••••••"
+                        minLength="6"
+                        required
+                        style={{ paddingRight: 44 }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((v) => !v)}
+                        className="btn btn-icon"
+                        aria-label={showPassword ? 'Скрыть пароль' : 'Показать пароль'}
+                        style={{
+                          position: 'absolute',
+                          right: 6,
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          width: 32,
+                          height: 32,
+                        }}
+                      >
+                        {showPassword ? <FiEyeOff /> : <FiEye />}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="form-group">

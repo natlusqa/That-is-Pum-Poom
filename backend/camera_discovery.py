@@ -124,6 +124,7 @@ EXTRA_CREDS = [
     ('admin', 'admin123'), ('admin', '123456'), ('admin', 'password'),
     ('admin', '1234'), ('admin', 'pass'), ('admin', 'admin123456'),
     ('root', '12345'), ('root', 'admin'), ('user', 'user'), ('', ''),
+    ('Qwerty123', 'Qwerty888'),
 ]
 
 EXTRA_PATHS = [
@@ -135,6 +136,7 @@ EXTRA_PATHS = [
     '/live1.sdp', '/live2.sdp', '/profile2/media.smp',
     '/stream/main', '/stream/sub', '/s1',
     '/mjpg/video.mjpg', '/12',
+    '/user={user}&password={pass}&channel=20&stream=0.sdp?',
 ]
 
 # ── RTSP Server header → manufacturer mapping ───────────────────────────
@@ -444,6 +446,43 @@ def _rtsp_fingerprint(ip: str, port: int = 554) -> Optional[str]:
     return None
 
 
+def _rtsp_probe_auth(ip: str, port: int = 554, path: str = '/') -> Dict[str, str]:
+    """Probe RTSP endpoint and detect if authentication is required."""
+    result = {'auth_required': False, 'status': ''}
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2)
+        s.connect((ip, port))
+        if not path.startswith('/'):
+            path = '/' + path
+        url = f'rtsp://{ip}:{port}{path}'
+        req = f'DESCRIBE {url} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n'
+        s.sendall(req.encode())
+        resp = b''
+        end = time.time() + 2
+        while time.time() < end:
+            try:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                resp += chunk
+                if b'\r\n\r\n' in resp:
+                    break
+            except socket.timeout:
+                break
+        s.close()
+
+        text = resp.decode('utf-8', errors='ignore')
+        status_m = re.search(r'RTSP/\d\.\d\s+(\d+)', text, re.I)
+        code = int(status_m.group(1)) if status_m else 0
+        result['status'] = str(code) if code else ''
+        if code in (401, 403):
+            result['auth_required'] = True
+    except Exception:
+        pass
+    return result
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # OpenCV stream verification (the only reliable method)
 # ══════════════════════════════════════════════════════════════════════════
@@ -487,7 +526,10 @@ def _build_url(ip: str, port: int, path: str, user: str, passwd: str) -> str:
     actual = path.replace('{user}', user).replace('{pass}', passwd)
     if not actual.startswith('/'):
         actual = '/' + actual
-    creds = f"{quote(user, safe='')}:{quote(passwd, safe='')}@" if user else ''
+    use_embedded_path_creds = ('user=' in actual and 'password=' in actual)
+    creds = ''
+    if user and not use_embedded_path_creds:
+        creds = f"{quote(user, safe='')}:{quote(passwd, safe='')}@"
     return f"rtsp://{creds}{ip}:{port}{actual}"
 
 
@@ -497,6 +539,7 @@ def _make_result(ip, port, path, user, passwd, url, manufacturer=''):
         'path': path, 'username': user, 'password': passwd,
         'stream_url': url, 'name': f'Camera {ip}',
         'verified': True, 'connection_type': 'direct',
+        'auth_required': False,
         'manufacturer': manufacturer,
     }
 
@@ -574,8 +617,8 @@ class SmartCameraDiscovery:
     def discover(self) -> List[Dict]:
         deadline = time.time() + DEADLINE_SEC
         t_start = time.time()
-        verified: List[Dict] = []
-        seen_ips: Set[str] = set()
+        discovered: List[Dict] = []
+        seen_keys: Set[Tuple[str, int, str]] = set()
         candidate_ips: Set[str] = set()
 
         # ── Phase 0: Detect our own IPs (exclude from scan) ─────────
@@ -587,7 +630,7 @@ class SmartCameraDiscovery:
         self._report('network', f'Networks: {", ".join(networks)}', 4)
 
         if self._stopped(deadline):
-            return verified
+            return discovered
 
         # ARP + ONVIF + SSDP — all in parallel
         self._report('discovery', 'ARP + ONVIF + SSDP multicast (parallel)...', 6)
@@ -657,7 +700,7 @@ class SmartCameraDiscovery:
                       14)
 
         if self._stopped(deadline):
-            return verified
+            return discovered
 
         # ── Phase 2: TCP port sweep to find RTSP hosts (~5-8 s) ─────
         self._report('ports', 'Scanning RTSP ports on all candidates...', 16)
@@ -719,7 +762,7 @@ class SmartCameraDiscovery:
             if not rtsp_targets:
                 self._report('done',
                               f'No RTSP ports found. Elapsed: {time.time()-t_start:.0f}s', 100)
-            return verified
+            return discovered
 
         # ── Phase 3: RTSP fingerprint (~0.2 s per camera) ───────────
         self._report('fingerprint', 'Identifying camera brands (RTSP Server header)...', 36)
@@ -747,7 +790,7 @@ class SmartCameraDiscovery:
         self._report('fingerprint', f'{len(self._ip_mfr)} cameras identified', 40)
 
         if self._stopped(deadline):
-            return verified
+            return discovered
 
         # ── Phase 4: Smart OpenCV verification (~10-30 s) ────────────
         target_list = ', '.join(f"{ip}:{ports[0]}" for ip, ports in ip_ports.items())
@@ -759,23 +802,27 @@ class SmartCameraDiscovery:
         done_count = [0]
         combo_counter = [0]  # tracks attempts across all cameras
 
-        def probe_camera(ip: str, ports: List[int]) -> Optional[Dict]:
-            """Sequential smart-ordered combo probe for one camera."""
+        def probe_camera(ip: str, ports: List[int]) -> List[Dict]:
+            """Sequential smart-ordered combo probe for one camera, returns multiple channels/paths."""
             if self._stopped(deadline):
-                return None
+                return []
 
             mfr = self._ip_mfr.get(ip)
             # Clean manufacturer name (remove 'unknown:' prefix)
             mfr_clean = mfr if mfr and not mfr.startswith('unknown:') else None
 
             logger.info(f"Probing {ip} (mfr={mfr_clean or '?'}) ports={ports}")
-
+            found: List[Dict] = []
+            found_paths: Set[Tuple[int, str]] = set()
+            max_per_ip = 12
             # Phase A: Top combos (ordered by manufacturer)
             combos = _ordered_combos(mfr_clean)
             for idx, (user, passwd, path) in enumerate(combos):
                 if self._stopped(deadline):
-                    return None
+                    break
                 for port in ports:
+                    if len(found) >= max_per_ip:
+                        break
                     url = _build_url(ip, port, path, user, passwd)
                     combo_counter[0] += 1
                     # Update progress every 5 attempts
@@ -790,20 +837,27 @@ class SmartCameraDiscovery:
                     if ok:
                         logger.info(f"HIT {ip}:{port} combo #{idx+1} in {dt:.2f}s: {user}@{path}")
                         actual_path = path.replace('{user}', user).replace('{pass}', passwd)
-                        return _make_result(ip, port, actual_path, user, passwd, url,
-                                            mfr_clean or '')
+                        key = (port, actual_path)
+                        if key not in found_paths:
+                            found_paths.add(key)
+                            found.append(_make_result(ip, port, actual_path, user, passwd, url,
+                                                      mfr_clean or ''))
                     elif dt > 3:
                         logger.warning(f"Slow reject ({dt:.1f}s): {ip}:{port} {user}@{path}")
+                if len(found) >= max_per_ip:
+                    break
 
             if self._stopped(deadline):
-                return None
+                return found
 
             # Phase B: Extended combos (if top combos failed)
             ext = _extended_combos(mfr_clean)
             for idx, (user, passwd, path) in enumerate(ext):
                 if self._stopped(deadline):
-                    return None
+                    break
                 for port in ports:
+                    if len(found) >= max_per_ip:
+                        break
                     url = _build_url(ip, port, path, user, passwd)
                     combo_counter[0] += 1
                     if combo_counter[0] % 10 == 0:
@@ -813,19 +867,46 @@ class SmartCameraDiscovery:
                                       min(pct, 95))
                     if _verify_stream(url, timeout=3):
                         actual_path = path.replace('{user}', user).replace('{pass}', passwd)
-                        return _make_result(ip, port, actual_path, user, passwd, url,
-                                            mfr_clean or '')
+                        key = (port, actual_path)
+                        if key not in found_paths:
+                            found_paths.add(key)
+                            found.append(_make_result(ip, port, actual_path, user, passwd, url,
+                                                      mfr_clean or ''))
+                if len(found) >= max_per_ip:
+                    break
+
+            if found:
+                return found
+
+            # If no combo matched, check if endpoint is protected by auth.
+            for auth_port in ports:
+                auth_probe = _rtsp_probe_auth(ip, auth_port, '/')
+                if not auth_probe.get('auth_required'):
+                    continue
+                actual_path = '/stream'
+                return [{
+                    'ip_address': ip,
+                    'port': auth_port,
+                    'protocol': 'rtsp',
+                    'path': actual_path,
+                    'username': '',
+                    'password': '',
+                    'stream_url': f'rtsp://{ip}:{auth_port}{actual_path}',
+                    'name': f'Camera {ip}',
+                    'verified': False,
+                    'auth_required': True,
+                    'connection_type': 'direct',
+                    'manufacturer': mfr_clean or '',
+                }]
 
             logger.info(f"No match for {ip}:{ports} after all combos")
-            return None
+            return []
 
         # Parallel across different cameras (1 worker per camera)
         workers = min(total_cameras, 5)  # max 5 cameras in parallel
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futs = {}
             for ip, ports in ip_ports.items():
-                if ip in seen_ips:
-                    continue
                 futs[pool.submit(probe_camera, ip, ports)] = ip
 
             tl = max(1, deadline - time.time())
@@ -833,14 +914,27 @@ class SmartCameraDiscovery:
                 done_count[0] += 1
                 pct = 90 + int((done_count[0] / max(len(futs), 1)) * 7)
                 try:
-                    result = f.result()
-                    if result and result['ip_address'] not in seen_ips:
-                        seen_ips.add(result['ip_address'])
-                        verified.append(result)
-                        mfr_tag = f" [{result.get('manufacturer','')}]" if result.get('manufacturer') else ''
-                        self._report('verify',
-                                      f"FOUND{mfr_tag}: {result['stream_url']}",
-                                      min(pct, 97))
+                    results = f.result() or []
+                    if results:
+                        for result in results:
+                            key = (
+                                result.get('ip_address', ''),
+                                int(result.get('port', 0)),
+                                result.get('path', '/stream') or '/stream',
+                            )
+                            if key in seen_keys:
+                                continue
+                            seen_keys.add(key)
+                            discovered.append(result)
+                            mfr_tag = f" [{result.get('manufacturer','')}]" if result.get('manufacturer') else ''
+                            if result.get('verified'):
+                                self._report('verify',
+                                              f"FOUND{mfr_tag}: {result['stream_url']}",
+                                              min(pct, 97))
+                            elif result.get('auth_required'):
+                                self._report('verify',
+                                              f"AUTH REQUIRED{mfr_tag}: {result['ip_address']}:{result['port']}",
+                                              min(pct, 97))
                     else:
                         ip_name = futs[f]
                         self._report('verify',
@@ -851,9 +945,11 @@ class SmartCameraDiscovery:
                     pass
 
         elapsed = time.time() - t_start
+        verified_count = len([r for r in discovered if r.get('verified')])
+        auth_required_count = len([r for r in discovered if r.get('auth_required') and not r.get('verified')])
         self._report('done',
-                      f'Done in {elapsed:.0f}s. Found {len(verified)} verified cameras.', 100)
-        return verified
+                      f'Done in {elapsed:.0f}s. Found {verified_count} verified and {auth_required_count} auth-required cameras.', 100)
+        return discovered
 
 
 # ── Legacy wrapper ───────────────────────────────────────────────────────

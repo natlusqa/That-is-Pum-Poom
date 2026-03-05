@@ -66,6 +66,7 @@ function MSEPlayer({ cameraUrl, cameraId, muted = true, onError, onConnected, cl
     const checkVideo = setInterval(() => {
       const video = el.querySelector('video') || el.video;
       if (video && video.readyState >= 2 && !video.paused) {
+        video.controls = false;
         setStatus('connected');
         onConnected?.();
         clearInterval(checkVideo);
@@ -91,6 +92,7 @@ function MSEPlayer({ cameraUrl, cameraId, muted = true, onError, onConnected, cl
       if (video) {
         video.muted = muted;
         video.playsInline = true;
+        video.controls = false;
         clearInterval(muteInterval);
       }
     }, 100);
@@ -119,7 +121,10 @@ function MSEPlayer({ cameraUrl, cameraId, muted = true, onError, onConnected, cl
     const el = rtcRef.current;
     if (!el) return;
     const video = el.querySelector('video') || el.video;
-    if (video) video.muted = muted;
+    if (video) {
+      video.muted = muted;
+      video.controls = false;
+    }
   }, [muted]);
 
   const isLoading = status === 'connecting' || status === 'reconnecting';

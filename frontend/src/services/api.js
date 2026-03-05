@@ -54,11 +54,11 @@ export const cameraAPI = {
 
 // --- CAMERA DISCOVERY ---
 export const discoveryAPI = {
-  startScan: () => api.post('/camera-discovery/scan'),
+  startScan: (data = {}) => api.post('/camera-discovery/scan', data),
   stopScan: () => api.post('/camera-discovery/stop'),
   getStatus: () => api.get('/camera-discovery/status'),
   addCamera: (data) => api.post('/camera-discovery/add', data),
-  addAll: () => api.post('/camera-discovery/add-all'),
+  addAll: (data = {}) => api.post('/camera-discovery/add-all', data),
 };
 
 // --- EMPLOYEES ---
@@ -85,6 +85,7 @@ export const attendanceAPI = {
   getByDate: (date) => api.get('/attendance', { params: { date } }),
   getByEmployee: (employeeId) =>
     api.get('/attendance', { params: { employee_id: employeeId } }),
+  update: (id, data) => api.put(`/attendance/${id}`, data),
   getStats: (params) => api.get('/attendance/stats', { params }),
   export: (params) => api.get('/attendance/export', { params }),
 };

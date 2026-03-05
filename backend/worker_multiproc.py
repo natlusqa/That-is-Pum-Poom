@@ -40,6 +40,7 @@ API_BASE_URL = os.environ.get('API_BASE_URL', 'http://localhost:5002')
 INTERNAL_API_KEY = os.environ.get('INTERNAL_API_KEY', 'surveillance-internal-key')
 THRESHOLD = float(os.environ.get('FACE_THRESHOLD', '0.5'))
 COOLDOWN = int(os.environ.get('FACE_COOLDOWN', '60'))
+ABSENCE_CHECKOUT_HOURS = float(os.environ.get('ABSENCE_CHECKOUT_HOURS', '3'))
 MAX_WORKERS = int(os.environ.get('MAX_WORKERS', '10'))
 FRAME_SKIP = int(os.environ.get('FRAME_SKIP', '3'))
 PROCESS_WIDTH = int(os.environ.get('PROCESS_WIDTH', '960'))  # resize before inference
@@ -50,6 +51,7 @@ FACE_RELOAD_INTERVAL = int(os.environ.get('FACE_RELOAD_INTERVAL', '30'))
 RECORDING_ENABLED = os.environ.get('RECORDING_ENABLED', 'true').lower() == 'true'
 RECORDING_SEGMENT_SECONDS = int(os.environ.get('RECORDING_SEGMENT_SECONDS', '300'))
 RECORDING_TEMP_DIR = os.environ.get('RECORDING_TEMP_DIR', os.path.join(os.path.dirname(__file__), 'recording_tmp'))
+ABSENCE_CHECKOUT_DELTA = timedelta(hours=ABSENCE_CHECKOUT_HOURS)
 
 # Timezone
 ASTANA_TZ = timezone(timedelta(hours=5))
@@ -272,7 +274,7 @@ class CameraWorker(threading.Thread):
                     'camera_id': self.camera_id,
                     'timestamp': now.isoformat(),
                     'confidence': float(sim),
-                    'event_type': 'check-in'
+                    'event_type': 'seen'
                 }
                 self.log_queue.put(log_entry)
                 self.last_seen[emp_id] = now
@@ -329,18 +331,112 @@ class AttendanceLogger(threading.Thread):
         self.log_queue = log_queue
         self.shutdown_event = shutdown_event
         self.log = logging.getLogger("logger")
+        self.employee_state = {}
+
+    def _parse_entry_ts(self, entry):
+        ts_raw = entry.get('timestamp')
+        if not ts_raw:
+            return get_astana_time()
+        try:
+            return datetime.fromisoformat(str(ts_raw))
+        except Exception:
+            return get_astana_time()
+
+    def _employee_seen_to_events(self, entry):
+        employee_id = entry.get('employee_id')
+        camera_id = entry.get('camera_id')
+        if employee_id is None or camera_id is None:
+            return []
+
+        ts = self._parse_entry_ts(entry)
+        confidence = float(entry.get('confidence', 0.0))
+        state = self.employee_state.get(employee_id, {
+            'in_office': False,
+            'last_seen': None,
+            'last_camera_id': camera_id,
+            'last_confidence': confidence,
+        })
+
+        events = []
+        last_seen = state.get('last_seen')
+        in_office = bool(state.get('in_office'))
+
+        # If employee was considered in office but absent for >3h,
+        # auto-close the previous visit and start a new one.
+        if in_office and isinstance(last_seen, datetime) and (ts - last_seen) >= ABSENCE_CHECKOUT_DELTA:
+            events.append({
+                'employee_id': employee_id,
+                'camera_id': state.get('last_camera_id', camera_id),
+                'timestamp': (last_seen + ABSENCE_CHECKOUT_DELTA).isoformat(),
+                'confidence': float(state.get('last_confidence', confidence)),
+                'event_type': 'check-out',
+            })
+            in_office = False
+
+        # Toggle logic: first detection -> check-in, next -> check-out.
+        event_type = 'check-out' if in_office else 'check-in'
+        events.append({
+            'employee_id': employee_id,
+            'camera_id': camera_id,
+            'timestamp': ts.isoformat(),
+            'confidence': confidence,
+            'event_type': event_type,
+        })
+
+        self.employee_state[employee_id] = {
+            'in_office': (event_type == 'check-in'),
+            'last_seen': ts,
+            'last_camera_id': camera_id,
+            'last_confidence': confidence,
+        }
+        return events
+
+    def _convert_entry(self, entry):
+        event_type = (entry.get('event_type') or '').strip().lower()
+        if event_type in ('check-in', 'check-out'):
+            return [entry]
+        if event_type == 'seen':
+            return self._employee_seen_to_events(entry)
+        return []
+
+    def _emit_absence_checkouts(self):
+        now = get_astana_time()
+        events = []
+        for employee_id, state in self.employee_state.items():
+            if not state.get('in_office'):
+                continue
+            last_seen = state.get('last_seen')
+            if not isinstance(last_seen, datetime):
+                continue
+            if (now - last_seen) >= ABSENCE_CHECKOUT_DELTA:
+                checkout_ts = last_seen + ABSENCE_CHECKOUT_DELTA
+                events.append({
+                    'employee_id': employee_id,
+                    'camera_id': state.get('last_camera_id'),
+                    'timestamp': checkout_ts.isoformat(),
+                    'confidence': float(state.get('last_confidence', 0.0)),
+                    'event_type': 'check-out',
+                })
+                state['in_office'] = False
+
+        return events
 
     def run(self):
         self.log.info("Attendance logger started")
         batch = []
         last_flush = time.time()
+        last_absence_check = time.time()
 
         while not self.shutdown_event.is_set():
             try:
                 entry = self.log_queue.get(timeout=1)
-                batch.append(entry)
+                batch.extend(self._convert_entry(entry))
             except Empty:
                 pass
+
+            if time.time() - last_absence_check >= 30:
+                batch.extend(self._emit_absence_checkouts())
+                last_absence_check = time.time()
 
             # Flush every 5 entries or every 2 seconds
             if len(batch) >= 5 or (batch and time.time() - last_flush > 2):

@@ -68,7 +68,7 @@ function CameraView() {
       fetch(`/go2rtc/api/frame.jpeg?src=camera_${id}_raw`).catch(() => {});
     } catch (err) {
       console.error('Error loading camera:', err);
-      addToast('Failed to load camera', 'error');
+      addToast('Не удалось загрузить камеру', 'error');
     } finally {
       setLoading(false);
     }
@@ -98,7 +98,7 @@ function CameraView() {
   const takeSnapshot = () => {
     const video = videoContainerRef.current?.querySelector('video');
     if (!video || !video.videoWidth) {
-      addToast('No video available for snapshot', 'error');
+      addToast('Нет видео для снимка', 'error');
       return;
     }
 
@@ -119,10 +119,10 @@ function CameraView() {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
-        addToast('Snapshot saved', 'success');
+        addToast('Снимок сохранен', 'success');
       }, 'image/jpeg', 0.95);
     } catch {
-      addToast('Failed to capture snapshot', 'error');
+      addToast('Не удалось сделать снимок', 'error');
     }
   };
 
@@ -134,7 +134,7 @@ function CameraView() {
   };
 
   const handleStreamError = (msg) => {
-    setStreamError(typeof msg === 'string' ? msg : 'Stream connection error');
+    setStreamError(typeof msg === 'string' ? msg : 'Ошибка подключения к потоку');
   };
 
   const handleStreamConnected = () => {
@@ -155,15 +155,11 @@ function CameraView() {
         {/* Header */}
         <div className="camera-view-header">
           <Link to="/" className="btn btn-secondary btn-sm">
-            <FiArrowLeft /> Back
+            <FiArrowLeft /> Назад
           </Link>
-          <h1>{camera?.name || 'Camera'}</h1>
+          <h1>{camera?.name || 'Камера'}</h1>
           <div className="camera-view-location">
             {camera?.location && <span className="camera-location-text">{camera.location}</span>}
-            {camera?.is_online
-              ? <span className="badge badge-success">Online</span>
-              : <span className="badge badge-danger">Offline</span>
-            }
           </div>
         </div>
 
@@ -199,7 +195,7 @@ function CameraView() {
             </>
           ) : (
             <div className="video-placeholder">
-              Stream URL not configured. Check camera settings.
+              URL потока не настроен. Проверьте параметры камеры.
             </div>
           )}
 
@@ -209,7 +205,7 @@ function CameraView() {
               <button
                 className={`video-toolbar-btn ${overlayEnabled ? 'active' : ''}`}
                 onClick={() => setOverlayEnabled(!overlayEnabled)}
-                title="Face detection overlay"
+                title="Показывать рамки распознавания"
               >
                 <FiSquare size={16} />
               </button>
@@ -217,28 +213,28 @@ function CameraView() {
             <button
               className="video-toolbar-btn"
               onClick={takeSnapshot}
-              title="Snapshot"
+              title="Снимок"
             >
               <FiCamera size={16} />
             </button>
             <button
               className="video-toolbar-btn"
               onClick={() => setMuted(!muted)}
-              title={muted ? 'Unmute' : 'Mute'}
+              title={muted ? 'Включить звук' : 'Выключить звук'}
             >
               {muted ? <FiVolumeX size={16} /> : <FiVolume2 size={16} />}
             </button>
             <button
               className="video-toolbar-btn"
               onClick={handleReload}
-              title="Reload stream"
+              title="Перезагрузить поток"
             >
               <FiRefreshCcw size={16} />
             </button>
             <button
               className="video-toolbar-btn"
               onClick={toggleFullscreen}
-              title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+              title={isFullscreen ? 'Выйти из полного экрана' : 'Полный экран'}
             >
               {isFullscreen ? <FiMinimize size={16} /> : <FiMaximize size={16} />}
             </button>

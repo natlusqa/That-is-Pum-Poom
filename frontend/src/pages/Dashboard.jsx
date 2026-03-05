@@ -8,7 +8,7 @@ import { cameraAPI, employeeAPI, attendanceAPI, authAPI } from '../services/api'
 import { useToast } from '../components/ToastProvider';
 import './Dashboard.css';
 
-function CameraThumbnail({ cameraId, isOnline }) {
+function CameraThumbnail({ cameraId, isOnline, onStatusChange }) {
   const [src, setSrc] = useState('');
   const [error, setError] = useState(false);
 
@@ -28,20 +28,23 @@ function CameraThumbnail({ cameraId, isOnline }) {
     };
 
     try {
-      if (isOnline) {
-        await fetchAsBlobUrl(`/api/cameras/${cameraId}/poster`);
-        return;
-      }
+      // Try live poster first even if camera is marked offline.
+      // is_online can be stale when heartbeat is delayed.
+      await fetchAsBlobUrl(`/api/cameras/${cameraId}/poster`);
+      onStatusChange?.(cameraId, true);
+      return;
     } catch {
       // fallback below
     }
 
     try {
       await fetchAsBlobUrl(`/api/cameras/${cameraId}/last-frame`);
+      onStatusChange?.(cameraId, false);
     } catch {
       setError(true);
+      onStatusChange?.(cameraId, false);
     }
-  }, [cameraId, isOnline]);
+  }, [cameraId, isOnline, onStatusChange]);
 
   useEffect(() => {
     loadPoster();
@@ -61,11 +64,11 @@ function CameraThumbnail({ cameraId, isOnline }) {
     }
   }, [loadPoster]);
 
-  if (!isOnline || error || !src) {
+  if (error || !src) {
     return (
       <div className="camera-thumb-placeholder">
         <FiVideo size={32} />
-        {!isOnline && <span>Не в сети</span>}
+        <span>{isOnline ? 'Нет кадра' : 'Не в сети'}</span>
       </div>
     );
   }
@@ -75,6 +78,7 @@ function CameraThumbnail({ cameraId, isOnline }) {
 
 function Dashboard() {
   const [cameras, setCameras] = useState([]);
+  const [liveOnlineMap, setLiveOnlineMap] = useState({});
   const [employeeCount, setEmployeeCount] = useState(0);
   const [todayEvents, setTodayEvents] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -93,6 +97,7 @@ function Dashboard() {
         employeeAPI.getAll(),
       ]);
       setCameras(camsRes.data);
+      setLiveOnlineMap({});
       setEmployeeCount(empsRes.data.length);
 
       const today = new Date().toISOString().split('T')[0];
@@ -112,7 +117,12 @@ function Dashboard() {
     }
   };
 
-  const onlineCameras = cameras.filter(c => c.is_online).length;
+  const getEffectiveOnline = useCallback((camera) => {
+    if (typeof liveOnlineMap[camera.id] === 'boolean') return liveOnlineMap[camera.id];
+    return !!camera.is_online;
+  }, [liveOnlineMap]);
+
+  const onlineCameras = cameras.filter(c => getEffectiveOnline(c)).length;
   const aiCameras = cameras.filter(c => c.face_recognition_enabled).length;
 
   if (loading) {
@@ -208,13 +218,22 @@ function Dashboard() {
             {cameras.map((camera) => (
               <Link key={camera.id} to={`/camera/${camera.id}`} className="camera-card">
                 <div className="camera-preview">
-                  <CameraThumbnail cameraId={camera.id} isOnline={camera.is_online} />
+                  <CameraThumbnail
+                    cameraId={camera.id}
+                    isOnline={getEffectiveOnline(camera)}
+                    onStatusChange={(camId, isUp) => {
+                      setLiveOnlineMap((prev) => {
+                        if (prev[camId] === isUp) return prev;
+                        return { ...prev, [camId]: isUp };
+                      });
+                    }}
+                  />
                   {camera.face_recognition_enabled && (
                     <span className="badge badge-info camera-badge"><FiCpu size={10} /> AI</span>
                   )}
                   <div className="camera-status-indicator">
-                    <span className={`status-dot ${camera.is_online ? 'status-dot-online' : 'status-dot-offline'}`} />
-                    {camera.is_online ? 'В сети' : 'Не в сети'}
+                    <span className={`status-dot ${getEffectiveOnline(camera) ? 'status-dot-online' : 'status-dot-offline'}`} />
+                    {getEffectiveOnline(camera) ? 'В сети' : 'Не в сети'}
                   </div>
                 </div>
                 <div className="camera-info">
