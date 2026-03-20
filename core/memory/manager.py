@@ -395,6 +395,74 @@ class MemoryManager:
     # Statistics
     # =========================================================================
 
+    async def get_action_stats(
+        self, since: datetime | None = None
+    ) -> dict[str, Any]:
+        """Get aggregated action statistics from agent_actions table."""
+        from sqlalchemy import func, case
+
+        async with self._session_factory() as session:
+            query = select(
+                func.count(AgentAction.id).label("total"),
+                func.count(
+                    case((AgentAction.status == "success", 1))
+                ).label("success"),
+                func.count(
+                    case((AgentAction.status == "failed", 1))
+                ).label("failed"),
+                func.count(
+                    case((AgentAction.status == "rolled_back", 1))
+                ).label("rolled_back"),
+                func.coalesce(func.avg(AgentAction.duration_ms), 0).label("avg_duration_ms"),
+            )
+            if since:
+                query = query.where(AgentAction.created_at >= since)
+
+            result = await session.execute(query)
+            row = result.one()
+
+            return {
+                "total": row.total,
+                "success": row.success,
+                "failed": row.failed,
+                "rolled_back": row.rolled_back,
+                "avg_duration_ms": float(row.avg_duration_ms),
+            }
+
+    async def get_cost_stats(
+        self, since: datetime | None = None
+    ) -> dict[str, Any]:
+        """Get API cost statistics from audit logs."""
+        from sqlalchemy import func
+
+        async with self._session_factory() as session:
+            query = select(AuditLog).where(
+                AuditLog.action.like("llm_%")
+            )
+            if since:
+                query = query.where(AuditLog.created_at >= since)
+
+            result = await session.execute(query)
+            entries = result.scalars().all()
+
+            total_cost = 0.0
+            by_model: dict[str, float] = {}
+            request_count = 0
+
+            for entry in entries:
+                details = entry.details or {}
+                cost = details.get("cost_usd", 0.0)
+                model = details.get("model", "unknown")
+                total_cost += cost
+                by_model[model] = by_model.get(model, 0.0) + cost
+                request_count += 1
+
+            return {
+                "total_cost_usd": round(total_cost, 4),
+                "by_model": by_model,
+                "request_count": request_count,
+            }
+
     async def get_stats(self) -> dict[str, Any]:
         """Get memory system statistics."""
         stats = {}

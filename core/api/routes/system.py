@@ -133,3 +133,105 @@ async def detailed_health():
         }
 
     return {"core": "healthy", "services": "unknown"}
+
+
+# =========================================================================
+# Intelligence & Scheduler endpoints
+# =========================================================================
+
+
+@router.get("/scheduler/jobs")
+async def list_scheduler_jobs():
+    """List all scheduled jobs and their next run times."""
+    state = get_state()
+    scheduler = state.get("scheduler")
+
+    if not scheduler:
+        raise HTTPException(status_code=503, detail="Scheduler not ready")
+
+    return {"jobs": scheduler.get_jobs()}
+
+
+@router.post("/intelligence/self-analysis")
+async def run_self_analysis():
+    """Trigger self-analysis manually."""
+    state = get_state()
+    engine = state.get("self_analysis")
+
+    if not engine:
+        raise HTTPException(status_code=503, detail="Self-analysis engine not ready")
+
+    report = await engine.run_analysis()
+    return report.to_dict()
+
+
+@router.post("/intelligence/daily-brief")
+async def generate_daily_brief():
+    """Generate daily brief on demand."""
+    state = get_state()
+    memory = state.get("memory")
+    llm = state.get("llm_router")
+
+    if not memory:
+        raise HTTPException(status_code=503, detail="Memory not ready")
+
+    from intelligence.daily_brief import DailyBriefGenerator
+    brief_gen = DailyBriefGenerator(memory_manager=memory, llm_router=llm)
+    brief = await brief_gen.generate()
+    return {"brief": brief}
+
+
+@router.get("/intelligence/crisis")
+async def get_crisis_status():
+    """Get current crisis detector status and active crises."""
+    state = get_state()
+    detector = state.get("crisis_detector")
+
+    if not detector:
+        raise HTTPException(status_code=503, detail="Crisis detector not ready")
+
+    return {
+        "status": detector.get_status(),
+        "active_crises": detector.get_active_crises(),
+    }
+
+
+@router.post("/intelligence/crisis/check")
+async def trigger_crisis_check():
+    """Trigger an immediate crisis check."""
+    state = get_state()
+    detector = state.get("crisis_detector")
+
+    if not detector:
+        raise HTTPException(status_code=503, detail="Crisis detector not ready")
+
+    events = await detector.check()
+    return {
+        "events_detected": len(events),
+        "events": [e.to_dict() for e in events],
+    }
+
+
+@router.get("/intelligence/feedback")
+async def get_feedback_stats():
+    """Get feedback loop statistics."""
+    state = get_state()
+    feedback = state.get("feedback_loop")
+
+    if not feedback:
+        raise HTTPException(status_code=503, detail="Feedback loop not ready")
+
+    return feedback.get_stats()
+
+
+@router.post("/intelligence/predictions")
+async def get_predictions():
+    """Generate predictive recommendations."""
+    state = get_state()
+    predictive = state.get("predictive")
+
+    if not predictive:
+        raise HTTPException(status_code=503, detail="Predictive engine not ready")
+
+    predictions = await predictive.generate_predictions()
+    return {"predictions": [p.to_dict() for p in predictions]}

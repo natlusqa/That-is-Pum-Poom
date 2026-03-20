@@ -230,11 +230,60 @@ class MemoryCompressor:
         if not self._collection:
             return 0
 
-        # This is a simplified dedup — in production you'd use clustering
         count_before = self._collection.count()
+        if count_before < 10:
+            return 0
 
-        # Get all vectors and find near-duplicates
-        # For now, just log the count — full dedup requires batch processing
-        logger.info("vector_dedup_check", total_vectors=count_before)
+        removed = 0
+        batch_size = 100
+        ids_to_remove: list[str] = []
+        seen_hashes: set[str] = set()
 
-        return 0  # Placeholder — full implementation requires batch vector comparison
+        try:
+            # Process in batches
+            offset = 0
+            while offset < count_before:
+                results = self._collection.get(
+                    limit=batch_size,
+                    offset=offset,
+                    include=["documents", "metadatas"],
+                )
+
+                if not results or not results["ids"]:
+                    break
+
+                for i, doc_id in enumerate(results["ids"]):
+                    doc = results["documents"][i] if results["documents"] else ""
+
+                    # Create a content hash for exact/near-exact dedup
+                    import hashlib
+                    # Normalize whitespace for comparison
+                    normalized = " ".join(doc.split()).strip().lower()
+                    content_hash = hashlib.md5(normalized.encode()).hexdigest()
+
+                    if content_hash in seen_hashes:
+                        ids_to_remove.append(doc_id)
+                    else:
+                        seen_hashes.add(content_hash)
+
+                offset += batch_size
+
+            # Remove duplicates
+            if ids_to_remove:
+                # ChromaDB delete in batches of 100
+                for i in range(0, len(ids_to_remove), 100):
+                    batch = ids_to_remove[i : i + 100]
+                    self._collection.delete(ids=batch)
+                removed = len(ids_to_remove)
+
+            logger.info(
+                "vector_dedup_completed",
+                before=count_before,
+                removed=removed,
+                after=count_before - removed,
+            )
+
+        except Exception as e:
+            logger.warning("vector_dedup_failed", error=str(e))
+
+        return removed

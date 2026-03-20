@@ -176,17 +176,32 @@ class SelfAnalysisEngine:
         return report
 
     async def _collect_metrics(self, report: AnalysisReport) -> None:
-        """Collect action metrics from memory."""
+        """Collect action metrics from memory — real DB queries."""
         if not self._memory:
             return
 
-        stats = await self._memory.get_stats()
-        report.total_actions = stats.get("total_audit_entries", 0)
+        try:
+            stats = await self._memory.get_stats()
+            report.total_actions = stats.get("total_audit_entries", 0)
 
-        # In production: query actual action results from agent_actions table
-        # For now, estimate from available data
-        report.successful_actions = int(report.total_actions * 0.9)
-        report.failed_actions = report.total_actions - report.successful_actions
+            # Query real action results from agent_actions table
+            action_stats = await self._memory.get_action_stats(
+                since=report.period_start
+            )
+            report.successful_actions = action_stats.get("success", 0)
+            report.failed_actions = action_stats.get("failed", 0)
+            report.rolled_back_actions = action_stats.get("rolled_back", 0)
+            report.avg_response_time_ms = action_stats.get("avg_duration_ms", 0)
+
+            # If no action stats available, fall back to audit log count
+            if report.successful_actions == 0 and report.failed_actions == 0:
+                report.total_actions = stats.get("total_audit_entries", 0)
+                report.successful_actions = report.total_actions  # assume success if no failures recorded
+        except Exception as e:
+            logger.warning("metrics_collection_fallback", error=str(e))
+            stats = await self._memory.get_stats()
+            report.total_actions = stats.get("total_audit_entries", 0)
+            report.successful_actions = report.total_actions
 
     async def _analyze_decisions(self, report: AnalysisReport) -> None:
         """Use LLM to analyze decision quality."""

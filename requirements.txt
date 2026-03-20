@@ -28,8 +28,9 @@ ollama>=0.4.0
 anthropic>=0.39.0
 openai>=1.55.0
 
-# --- Task Queue ---
+# --- Task Queue & Scheduling ---
 celery[redis]>=5.4.0
+apscheduler>=3.10.0
 
 # --- Utilities ---
 pydantic>=2.10.0

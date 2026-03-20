@@ -85,6 +85,8 @@ class Orchestrator:
         permission_manager: PermissionManager,
         autonomy_engine: AutonomyEngine,
         agents: dict[str, Any] | None = None,
+        feedback_loop: Any = None,
+        crisis_detector: Any = None,
     ):
         self.llm = llm_router
         self.reasoning = reasoning_engine
@@ -92,6 +94,8 @@ class Orchestrator:
         self.permissions = permission_manager
         self.autonomy = autonomy_engine
         self.agents = agents or {}
+        self.feedback = feedback_loop
+        self.crisis = crisis_detector
         self._system_prompt = self._build_system_prompt()
 
     def _build_system_prompt(self) -> str:
@@ -378,7 +382,24 @@ Message: {request.content}"""
 
         # Execute
         self.reasoning.add_step(reasoning_log, "executing", "Выполняю...")
-        result = await agent.execute(request.content, context)
+        result = await agent.execute_with_tracking(request.content, context)
+
+        # Feed result into feedback loop
+        if self.feedback:
+            await self.feedback.record_from_action_result(
+                agent_name=agent_name,
+                action_type=result.action_type,
+                task=request.content,
+                result=result,
+                was_auto=not autonomy_decision.needs_approval,
+            )
+
+        # Track errors for crisis detection
+        if self.crisis:
+            if result.success:
+                self.crisis.record_success()
+            else:
+                self.crisis.record_error()
 
         return OrchestratorResponse(
             request_id=request.id,

@@ -175,7 +175,9 @@ class PredictiveEngine:
             import psutil
 
             # Disk space
-            disk = psutil.disk_usage("C:\\")
+            import platform as _platform
+            _root = "/" if _platform.system() != "Windows" else "C:\\"
+            disk = psutil.disk_usage(_root)
             if disk.percent > 80:
                 days_until_full = None
                 free_gb = disk.free / 1024**3

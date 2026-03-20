@@ -29,6 +29,15 @@ from core.agents.git_agent import GitAgent
 from core.agents.powershell_agent import PowerShellAgent
 from core.agents.code_agent import CodeAgent
 from core.agents.system_agent import SystemAgent
+from core.scheduler import KorganScheduler
+from core.memory.compression import MemoryCompressor
+from intelligence.self_analysis import SelfAnalysisEngine
+from intelligence.daily_brief import DailyBriefGenerator
+from intelligence.crisis import CrisisDetector
+from intelligence.code_scoring import CodeQualityScorer
+from intelligence.predictive import PredictiveEngine
+from intelligence.feedback_loop import FeedbackLoop
+from intelligence.improvement import ContinuousImprovementEngine
 
 logger = structlog.get_logger("korgan.api")
 
@@ -108,7 +117,7 @@ async def lifespan(app: FastAPI):
         "system_agent": SystemAgent(memory_manager=memory_mgr, permission_manager=permission_mgr),
     }
 
-    # Initialize Orchestrator
+    # Initialize Orchestrator (with feedback loop and crisis detector)
     orchestrator = Orchestrator(
         llm_router=llm_router,
         reasoning_engine=reasoning_engine,
@@ -116,6 +125,51 @@ async def lifespan(app: FastAPI):
         permission_manager=permission_mgr,
         autonomy_engine=autonomy_engine,
         agents=agents_dict,
+        feedback_loop=feedback_loop,
+        crisis_detector=crisis_detector,
+    )
+
+    # Initialize Intelligence Engine components
+    crisis_config = system_config.get("intelligence", {}).get("crisis_detection", {})
+    self_analysis = SelfAnalysisEngine(
+        memory_manager=memory_mgr,
+        llm_router=llm_router,
+    )
+    daily_brief = DailyBriefGenerator(
+        memory_manager=memory_mgr,
+        llm_router=llm_router,
+    )
+    crisis_detector = CrisisDetector(
+        autonomy_engine=autonomy_engine,
+        memory_manager=memory_mgr,
+        config=crisis_config,
+    )
+    code_scorer = CodeQualityScorer(llm_router=llm_router)
+    feedback_loop = FeedbackLoop(
+        memory_manager=memory_mgr,
+        llm_router=llm_router,
+        autonomy_engine=autonomy_engine,
+    )
+    improvement_engine = ContinuousImprovementEngine(
+        memory_manager=memory_mgr,
+        llm_router=llm_router,
+    )
+    predictive_engine = PredictiveEngine(memory_manager=memory_mgr)
+    memory_compressor = MemoryCompressor(
+        session_factory=memory_mgr._session_factory,
+        llm_router=llm_router,
+        chroma_collection=memory_mgr._collection,
+    )
+
+    # Initialize Scheduler
+    scheduler = KorganScheduler(
+        self_analysis=self_analysis,
+        daily_brief=daily_brief,
+        crisis_detector=crisis_detector,
+        memory_compressor=memory_compressor,
+        feedback_loop=feedback_loop,
+        improvement_engine=improvement_engine,
+        predictive_engine=predictive_engine,
     )
 
     # Store in state
@@ -128,6 +182,15 @@ async def lifespan(app: FastAPI):
     set_state("llm_router", llm_router)
     set_state("agents", agents_dict)
     set_state("settings", settings)
+    set_state("scheduler", scheduler)
+    set_state("crisis_detector", crisis_detector)
+    set_state("feedback_loop", feedback_loop)
+    set_state("self_analysis", self_analysis)
+    set_state("code_scorer", code_scorer)
+    set_state("predictive", predictive_engine)
+
+    # Start scheduler
+    scheduler.start()
 
     logger.info("korgan_ready", autonomy_level=autonomy_engine.current_level.name)
 
@@ -142,6 +205,7 @@ async def lifespan(app: FastAPI):
 
     # Cleanup
     logger.info("korgan_shutting_down")
+    scheduler.stop()
     await memory_mgr.close()
 
 

@@ -9,6 +9,7 @@ from intelligence.code_scoring import CodeQualityScorer
 from intelligence.predictive import PredictiveEngine
 from intelligence.crisis import CrisisDetector
 from intelligence.improvement import ContinuousImprovementEngine
+from intelligence.feedback_loop import FeedbackLoop
 
 __all__ = [
     "SelfAnalysisEngine",
@@ -17,4 +18,5 @@ __all__ = [
     "PredictiveEngine",
     "CrisisDetector",
     "ContinuousImprovementEngine",
+    "FeedbackLoop",
 ]

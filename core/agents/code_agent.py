@@ -82,8 +82,14 @@ class CodeAgent(BaseAgent):
 
         if any(w in task_lower for w in ["analyze", "анализ", "structure", "структур"]):
             return await self.analyze_project(context)
+        elif any(w in task_lower for w in ["bug", "баг", "ошибк", "find_bugs"]):
+            return await self.find_bugs(context)
+        elif any(w in task_lower for w in ["test", "тест", "generate_test"]):
+            return await self.generate_tests(context)
         elif any(w in task_lower for w in ["score", "качеств", "quality"]):
             return await self.score_quality(context)
+        elif any(w in task_lower for w in ["search", "поиск", "найди"]):
+            return await self.search_code(task, context)
         elif any(w in task_lower for w in ["explain", "объясн"]):
             return await self.explain_code(task, context)
         else:
@@ -243,6 +249,203 @@ class CodeAgent(BaseAgent):
             agent_name=self.name,
             action_type="explain_code",
             summary=result.content,
+        )
+
+    async def find_bugs(self, file_or_dir: str = ".") -> ActionResult:
+        """Find bugs using static analysis + LLM review."""
+        import re
+
+        target = Path(file_or_dir) if file_or_dir != "." else Path.cwd()
+        files_to_check = []
+
+        if target.is_file():
+            files_to_check = [target]
+        elif target.is_dir():
+            for f in target.rglob("*.py"):
+                if not any(
+                    p in str(f)
+                    for p in ["__pycache__", ".git", "venv", "node_modules"]
+                ):
+                    files_to_check.append(f)
+            files_to_check = files_to_check[:20]  # limit
+
+        if not files_to_check:
+            return ActionResult(
+                agent_name=self.name,
+                action_type="find_bugs",
+                summary="Файлы для анализа не найдены.",
+            )
+
+        all_issues: list[dict] = []
+
+        # Static analysis patterns
+        bug_patterns = [
+            (r"except\s*:", "Bare except — catches all exceptions including SystemExit/KeyboardInterrupt"),
+            (r"except\s+Exception\s*:", None),  # OK pattern, skip
+            (r"\beval\s*\(", "Unsafe eval() usage — potential code injection"),
+            (r"\bexec\s*\(", "Unsafe exec() usage — potential code injection"),
+            (r"os\.system\s*\(", "os.system() — use subprocess instead for safety"),
+            (r'password\s*=\s*["\'][^"\']{3,}["\']', "Possible hardcoded password"),
+            (r'secret\s*=\s*["\'][^"\']{3,}["\']', "Possible hardcoded secret"),
+            (r"TODO|FIXME|HACK|XXX", "TODO/FIXME marker found"),
+            (r"import \*", "Wildcard import — pollutes namespace"),
+            (r"\.format\(.*\)", None),  # not a bug
+            (r"time\.sleep\s*\(\s*\d{2,}", "Long sleep() call — may block async event loop"),
+        ]
+
+        for fpath in files_to_check:
+            try:
+                code = fpath.read_text(encoding="utf-8", errors="ignore")
+                lines = code.split("\n")
+
+                for line_no, line in enumerate(lines, 1):
+                    for pattern, description in bug_patterns:
+                        if description and re.search(pattern, line, re.IGNORECASE):
+                            all_issues.append({
+                                "file": str(fpath),
+                                "line": line_no,
+                                "issue": description,
+                                "code": line.strip()[:120],
+                            })
+            except Exception:
+                continue
+
+        # LLM-enhanced review for top files
+        llm_issues = []
+        if self._llm and files_to_check:
+            top_file = files_to_check[0]
+            try:
+                code = top_file.read_text(encoding="utf-8", errors="ignore")[:6000]
+                result = await self._llm.generate(
+                    prompt=f"""Найди потенциальные баги и проблемы в этом Python-коде.
+Верни JSON массив: [{{"line": N, "issue": "описание", "severity": "low|medium|high"}}]
+Если багов нет — верни [].
+
+```python
+{code}
+```""",
+                    task_type="code_review",
+                    force_local=True,
+                    temperature=0.2,
+                    max_tokens=800,
+                )
+                import json
+                content = result.content.strip()
+                start = content.find("[")
+                end = content.rfind("]") + 1
+                if start >= 0 and end > start:
+                    llm_issues = json.loads(content[start:end])
+            except Exception as e:
+                logger.warning("llm_bug_review_failed", error=str(e))
+
+        # Build report
+        total = len(all_issues) + len(llm_issues)
+        lines = [f"Анализ багов: {len(files_to_check)} файлов, {total} проблем найдено\n"]
+
+        if all_issues:
+            lines.append("--- Статический анализ ---")
+            for issue in all_issues[:15]:
+                lines.append(
+                    f"  {issue['file']}:{issue['line']} — {issue['issue']}"
+                )
+
+        if llm_issues:
+            lines.append("\n--- LLM-ревью ---")
+            for issue in llm_issues[:10]:
+                sev = issue.get("severity", "?")
+                lines.append(
+                    f"  [{sev}] Line {issue.get('line', '?')}: {issue.get('issue', 'N/A')}"
+                )
+
+        if not all_issues and not llm_issues:
+            lines.append("Проблем не обнаружено!")
+
+        return ActionResult(
+            agent_name=self.name,
+            action_type="find_bugs",
+            summary="\n".join(lines),
+            output={"static_issues": all_issues, "llm_issues": llm_issues},
+        )
+
+    async def generate_tests(self, file_path: str = "") -> ActionResult:
+        """Generate test cases for a file using LLM."""
+        if not file_path or not self._llm:
+            return ActionResult(
+                agent_name=self.name,
+                action_type="generate_tests",
+                summary="Укажите файл и убедитесь что LLM доступен.",
+            )
+
+        try:
+            code = Path(file_path).read_text(encoding="utf-8", errors="ignore")[:6000]
+        except Exception as e:
+            return ActionResult(
+                agent_name=self.name,
+                action_type="generate_tests",
+                status=ActionStatus.FAILED,
+                summary=f"Не удалось прочитать файл: {e}",
+                error=str(e),
+            )
+
+        result = await self._llm.generate(
+            prompt=f"""Сгенерируй pytest-тесты для следующего Python-кода.
+Используй pytest + pytest-asyncio для async-функций.
+Включи: edge cases, error handling, happy path.
+Верни только код тестов без пояснений.
+
+```python
+{code}
+```""",
+            task_type="code_generation",
+            temperature=0.3,
+            max_tokens=2000,
+        )
+
+        return ActionResult(
+            agent_name=self.name,
+            action_type="generate_tests",
+            summary=f"Тесты для {file_path}:\n\n{result.content}",
+            output=result.content,
+        )
+
+    async def search_code(self, query: str, project_path: str = ".") -> ActionResult:
+        """Search codebase for patterns or keywords."""
+        import re
+
+        target = Path(project_path) if project_path != "." else Path.cwd()
+        results = []
+
+        # Extract search term from query
+        search_term = query.lower()
+        for prefix in ["search", "поиск", "найди", "find"]:
+            search_term = search_term.replace(prefix, "").strip()
+
+        for fpath in target.rglob("*.py"):
+            if any(p in str(fpath) for p in ["__pycache__", ".git", "venv"]):
+                continue
+            try:
+                for line_no, line in enumerate(
+                    fpath.read_text(encoding="utf-8", errors="ignore").split("\n"),
+                    1,
+                ):
+                    if search_term in line.lower():
+                        results.append({
+                            "file": str(fpath),
+                            "line": line_no,
+                            "content": line.strip()[:150],
+                        })
+            except Exception:
+                continue
+
+        summary = f"Поиск '{search_term}': {len(results)} совпадений\n"
+        for r in results[:20]:
+            summary += f"  {r['file']}:{r['line']} — {r['content']}\n"
+
+        return ActionResult(
+            agent_name=self.name,
+            action_type="search_code",
+            summary=summary,
+            output=results[:50],
         )
 
     async def rollback(self, action_id: str) -> bool:

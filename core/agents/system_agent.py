@@ -84,7 +84,7 @@ class SystemAgent(BaseAgent):
 
             mem = psutil.virtual_memory()
 
-            disk = psutil.disk_usage("C:\\")
+            disk = psutil.disk_usage("/" if platform.system() != "Windows" else "C:\\")
 
             # GPU info via nvidia-smi
             gpu_info = await self._get_gpu_info()
